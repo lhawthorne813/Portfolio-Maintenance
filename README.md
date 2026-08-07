@@ -34,6 +34,8 @@ node test/api.test.js   # run the 57-check test suite (server must be running)
 - **CapEx forecast horizons** — 12 / 24 / 60 months with confidence levels; property comparison table (sortable); spend by vendor and technician; reactive-vs-preventive split.
 - **Notification preferences** — per-kind in-app toggles (schema is email/SMS-ready).
 - **Audit trail** — old → new values on status/priority/assignment changes; overrides logged.
+- **Public tenant intake** — every property has a shareable link and printable QR poster (Property page → "Tenant request link"). Tenants report issues with photos, access notes, pets, and availability — no account, no app. Submissions land in the triage queue, notify management instantly, and photos + access details carry onto the converted work order. Rate-limited; links are unguessable and can be reset per property at any time.
+- **Owner-review routing (per property)** — owners choose whether tenant requests go straight to maintenance triage or are held for the owner to review and release first (emergencies always go straight through). Viewers — the read-only owner/investor role — can also submit maintenance requests themselves, recorded as owner-reported.
 
 ## Architecture
 - **Backend:** Node + Express + better-sqlite3 (`src/db.js` schema+migration, `src/api.js` REST, `src/insights.js` analytics, `src/seed.js` + `src/seed2.js` demo data)
