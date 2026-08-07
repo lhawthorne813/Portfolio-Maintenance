@@ -308,3 +308,11 @@ th.sortable{cursor:pointer;user-select:none}
 th.sortable:hover{color:var(--pine)}
 .skel{background:linear-gradient(90deg,var(--line) 25%,#EDF1F0 50%,var(--line) 75%);background-size:200% 100%;animation:sk 1.2s infinite;border-radius:10px;height:70px;margin-bottom:10px}
 @keyframes sk{to{background-position:-200% 0}}
+
+/* V2 fix: job cards are stacked content blocks (V1's flex layout expected a rail+inner wrapper) */
+.job-card{display:block;padding:14px 15px;border-left:6px solid var(--blue);color:inherit;text-decoration:none}
+.job-card.emergency{border-left-color:var(--red)}
+.job-card.next{border-left-color:var(--pine)}
+.job-card .t{font-family:var(--font-d);font-weight:700;font-size:16.5px;margin:3px 0 2px;display:block}
+.job-card .s{font-size:13px;color:var(--muted);display:block}
+.job-card .next-label{font-size:10.5px;font-weight:800;letter-spacing:.8px;color:var(--pine);margin-bottom:2px}
