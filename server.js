@@ -1,4 +1,4 @@
-// OpsDeck V2 — Property Maintenance Operations Platform (multi-tenant)
+// Steadhold V2 — Property Maintenance Operations Platform (multi-tenant)
 const express = require('express');
 const session = require('express-session');
 const path = require('path');
@@ -48,7 +48,7 @@ setInterval(generatePMWorkOrders, 6 * 60 * 60 * 1000);
 // Startup configuration report — makes missing Railway setup obvious in deploy logs
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`OpsDeck V2 running on port ${PORT}`);
+  console.log(`Steadhold V2 running on port ${PORT}`);
   const dataDir = process.env.DATA_DIR || path.join(__dirname, 'data');
   console.log(`  Data directory:   ${dataDir}${process.env.DATA_DIR ? '' : '  (set DATA_DIR=/data with a mounted volume so the database survives redeploys)'}`);
   console.log(`  Upload directory: ${process.env.UPLOAD_DIR || path.join(__dirname, 'uploads')}${process.env.UPLOAD_DIR ? '' : '  (set UPLOAD_DIR=/data/uploads so photos survive redeploys)'}`);

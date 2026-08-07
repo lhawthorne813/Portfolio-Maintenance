@@ -1,4 +1,4 @@
-# OpsDeck V2 — Property Maintenance Operations Platform
+# Steadhold — Property Maintenance Operations Platform
 
 Multi-tenant maintenance operations for small rental portfolios: intake → triage → work orders → completion enforcement → analytics, with roles for owners, managers, technicians, vendors, and read-only viewers.
 

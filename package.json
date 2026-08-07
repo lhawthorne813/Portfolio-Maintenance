@@ -1,7 +1,7 @@
 {
-  "name": "opsdeck",
+  "name": "steadhold",
   "version": "1.0.0",
-  "description": "Property Maintenance Operations Platform",
+  "description": "Steadhold — Property Maintenance Operations Platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
