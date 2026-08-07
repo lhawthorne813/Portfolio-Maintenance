@@ -15,7 +15,7 @@ function seed(force = false) {
   if (has && !force) return false;
   if (force) {
     const tables = ['inspections','notifications','approvals','pm_schedules','time_logs','expenses','materials',
-      'comments','photos','wo_history','work_orders','requests','assets','units','properties','users','vendors','settings'];
+      'comments','photos','wo_history','work_orders','requests','assets','units','properties','users','vendors','settings','vendor_quotes','completion_requirements','invites','notification_prefs','rvr_actions','organizations'];
     db.pragma('foreign_keys = OFF');
     for (const t of tables) db.exec(`DELETE FROM ${t}; DELETE FROM sqlite_sequence WHERE name='${t}';`);
     db.pragma('foreign_keys = ON');
