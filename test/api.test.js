@@ -22,7 +22,7 @@ function ok(cond, name, extra) {
 }
 
 (async () => {
-  console.log('OpsDeck V2 test suite\n');
+  console.log('Steadhold V2 test suite\n');
 
   console.log('AUTH & ROLES');
   ok((await call('anon', 'GET', '/dashboard')).status === 401, 'unauthenticated requests are rejected');
