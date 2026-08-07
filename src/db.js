@@ -424,6 +424,23 @@ function migrateV2() {
     MIGRATION_LOG.push('work_orders: number uniqueness changed from global to per-organization');
   }
 
+  // Phone notifications: web-push device subscriptions, per-kind push pref, optional Pushover key
+  db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    endpoint TEXT NOT NULL UNIQUE,
+    sub_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  if (!hasColumn('notification_prefs', 'push')) {
+    db.exec(`ALTER TABLE notification_prefs ADD COLUMN push INTEGER DEFAULT 1`);
+    MIGRATION_LOG.push('notification_prefs: added push channel (phone notifications)');
+  }
+  if (!hasColumn('users', 'pushover_key')) {
+    db.exec(`ALTER TABLE users ADD COLUMN pushover_key TEXT`);
+    MIGRATION_LOG.push('users: added pushover_key (optional Pushover delivery)');
+  }
+
   // Tenant intake: public per-property tokens + photos attachable to requests
   if (!hasColumn('properties', 'intake_token')) {
     db.exec(`ALTER TABLE properties ADD COLUMN intake_token TEXT`);

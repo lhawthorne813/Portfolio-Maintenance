@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const QRCode = require('qrcode');
 const db = require('./db');
+const push = require('./push');
 const I = require('./insights');
 const { OPEN_STATUSES } = I;
 
@@ -36,6 +37,7 @@ const VALID_ROLES = ['owner', 'manager', 'technician', 'viewer', 'vendor'];
 
 function me(req) { return req.session.userId ? db.prepare('SELECT * FROM users WHERE id=?').get(req.session.userId) : null; }
 function requireAuth(req, res, next) {
+  captureAppUrl(req);
   const u = me(req);
   if (!u || !u.active) return res.status(401).json({ error: 'Not signed in' });
   req.user = u;
@@ -69,16 +71,18 @@ function hist(orgId, woId, userId, action, detail, oldVal, newVal) {
   db.prepare(`INSERT INTO wo_history (organization_id,work_order_id,user_id,action,detail,old_value,new_value,created_at)
     VALUES (?,?,?,?,?,?,?,?)`).run(orgId, woId, userId, action, detail || null, oldVal ?? null, newVal ?? null, now());
 }
+let APP_URL = process.env.APP_URL || '';
 function notify(orgId, userIds, kind, title, body, link) {
   const ins = db.prepare('INSERT INTO notifications (organization_id,user_id,kind,title,body,link,created_at) VALUES (?,?,?,?,?,?,?)');
   const pref = db.prepare('SELECT in_app FROM notification_prefs WHERE user_id=? AND kind=?');
   for (const uid of [].concat(userIds).filter(Boolean)) {
     const p = pref.get(uid, kind);
-    if (p && !p.in_app) continue;             // user opted out of this kind
-    ins.run(orgId, uid, kind, title, body || null, link || null, now());
-    // Email/SMS-ready: delivery adapters would hook here, reading notification_prefs.email / .sms
+    if (!p || p.in_app) ins.run(orgId, uid, kind, title, body || null, link || null, now());
+    // Phone delivery (web push to registered devices + Pushover if configured) — independent of the in-app feed
+    try { push.deliverToPhone(uid, kind, title, body, link, APP_URL); } catch (e) {}
   }
 }
+function captureAppUrl(req) { if (!APP_URL) APP_URL = `${req.protocol}://${req.get('host')}`; }
 function mgmtIds(orgId) { return db.prepare(`SELECT id FROM users WHERE organization_id=? AND role IN ('owner','manager') AND active=1`).all(orgId).map(r => r.id); }
 function ownerIds(orgId) { return db.prepare(`SELECT id FROM users WHERE organization_id=? AND role='owner' AND active=1`).all(orgId).map(r => r.id); }
 function setting(orgId, key, def) {
@@ -360,19 +364,40 @@ router.put('/completion-requirements', MGMT_WRITE, (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---- phone push registration ---- */
+router.get('/push/vapid-public-key', (req, res) => res.json({ key: push.publicKey() }));
+router.post('/push/subscribe', (req, res) => {
+  if (!push.saveSubscription(req.user.id, req.body.subscription)) return res.status(400).json({ error: 'Invalid subscription' });
+  res.json({ ok: true, devices: push.subscriptionCount(req.user.id) });
+});
+router.post('/push/unsubscribe', (req, res) => {
+  push.removeSubscription(req.user.id, (req.body.subscription || {}).endpoint);
+  res.json({ ok: true, devices: push.subscriptionCount(req.user.id) });
+});
+router.get('/push/status', (req, res) => {
+  const u = db.prepare('SELECT pushover_key FROM users WHERE id=?').get(req.user.id);
+  res.json({ devices: push.subscriptionCount(req.user.id), pushover_configured: !!(u && u.pushover_key),
+    pushover_available: !!process.env.PUSHOVER_TOKEN });
+});
+router.patch('/push/pushover-key', (req, res) => {
+  const key = (req.body.key || '').trim().slice(0, 60);
+  db.prepare('UPDATE users SET pushover_key=? WHERE id=?').run(key || null, req.user.id);
+  res.json({ ok: true });
+});
+
 router.get('/notification-prefs', (req, res) => {
   const kinds = ['emergency', 'assigned', 'approval', 'approval_decision', 'overdue', 'completed', 'quote', 'pm_due', 'repeat', 'asset_warning', 'request', 'high_cost'];
   const prefs = {};
-  kinds.forEach(k => prefs[k] = { in_app: 1, email: 0, sms: 0 });
+  kinds.forEach(k => prefs[k] = { in_app: 1, push: 1, email: 0, sms: 0 });
   db.prepare('SELECT * FROM notification_prefs WHERE user_id=?').all(req.user.id)
-    .forEach(p => prefs[p.kind] = { in_app: p.in_app, email: p.email, sms: p.sms });
+    .forEach(p => prefs[p.kind] = { in_app: p.in_app, push: p.push == null ? 1 : p.push, email: p.email, sms: p.sms });
   res.json(prefs);
 });
 router.put('/notification-prefs', (req, res) => {
   for (const [kind, p] of Object.entries(req.body || {})) {
     db.prepare('DELETE FROM notification_prefs WHERE user_id=? AND kind=?').run(req.user.id, kind);
-    db.prepare('INSERT INTO notification_prefs (user_id,kind,in_app,email,sms) VALUES (?,?,?,?,?)')
-      .run(req.user.id, kind, p.in_app ? 1 : 0, p.email ? 1 : 0, p.sms ? 1 : 0);
+    db.prepare('INSERT INTO notification_prefs (user_id,kind,in_app,push,email,sms) VALUES (?,?,?,?,?,?)')
+      .run(req.user.id, kind, p.in_app ? 1 : 0, p.push ? 1 : 0, p.email ? 1 : 0, p.sms ? 1 : 0);
   }
   res.json({ ok: true });
 });
