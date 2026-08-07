@@ -193,6 +193,84 @@ function renderJoin(qs) {
   });
 }
 
+/* ---------------- public tenant report form ---------------- */
+async function renderReport(token) {
+  document.title = 'Report a maintenance issue';
+  let info;
+  try {
+    const r = await fetch('/api/intake/' + encodeURIComponent(token));
+    if (!r.ok) throw new Error();
+    info = await r.json();
+  } catch (e) {
+    $app.innerHTML = `<div class="login-wrap"><div class="login-card">
+      <div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+      <div class="err">This link isn't valid anymore. Please contact your property manager directly.</div></div></div>`;
+    return;
+  }
+  $app.innerHTML = `<div class="login-wrap"><div class="login-card" style="max-width:520px">
+    <div class="brand"><span class="brand-mark">O</span> ${esc(info.org)}</div>
+    <div class="login-sub">Report a maintenance issue at <b>${esc(info.property)}</b>. Your property manager is notified immediately.</div>
+    <div class="banner warn" style="margin-bottom:14px">If this is a fire, gas leak, or someone is in danger, call 911 first.</div>
+    ${info.units.length ? `<div class="field"><label>Your unit</label><select id="tr-unit"><option value="">Not sure / whole property</option>${info.units.map(u => `<option value="${u.id}">Unit ${esc(u.label)}</option>`).join('')}</select></div>` : ''}
+    <div class="field"><label>What kind of issue?</label><select id="tr-cat">${info.categories.map(c => `<option>${c}</option>`).join('')}</select></div>
+    <div class="field"><label>Describe what's happening</label><textarea id="tr-desc" placeholder="What's wrong, where it is, when it started…"></textarea></div>
+    <div class="tglrow"><span>🚨 <b>This is an emergency</b> (flooding, no heat/AC in extreme weather, unsafe conditions)</span><input type="checkbox" class="tgl" id="tr-emerg"></div>
+    <div class="pill-row" style="margin:6px 0 12px">
+      <label class="btn sec" style="padding:7px 12px;font-size:12.5px"><input type="checkbox" id="trf-water" style="margin-right:5px">💧 Water leak</label>
+      <label class="btn sec" style="padding:7px 12px;font-size:12.5px"><input type="checkbox" id="trf-elec" style="margin-right:5px">⚡ Electrical</label>
+      <label class="btn sec" style="padding:7px 12px;font-size:12.5px"><input type="checkbox" id="trf-hvac" style="margin-right:5px">❄ No heat/AC</label>
+      <label class="btn sec" style="padding:7px 12px;font-size:12.5px"><input type="checkbox" id="trf-safety" style="margin-right:5px">⚠ Safety hazard</label>
+    </div>
+    <div class="field"><label>Photos (up to 3 — really helps us fix it faster)</label>
+      <input id="tr-photos" type="file" accept="image/*" capture="environment" multiple>
+      <div class="s" id="tr-photo-count" style="margin-top:4px"></div></div>
+    <div class="row2">
+      <div class="field"><label>Your name</label><input id="tr-name" autocomplete="name"></div>
+      <div class="field"><label>Phone</label><input id="tr-phone" inputmode="tel" autocomplete="tel"></div>
+    </div>
+    <div class="field"><label>Email (optional)</label><input id="tr-email" type="email" autocomplete="email"></div>
+    <div class="tglrow"><span>You may enter to make the repair if I'm not home</span><input type="checkbox" class="tgl" id="tr-pte" checked></div>
+    <div class="field"><label>Access notes (lockbox, gate code, parking…)</label><input id="tr-access"></div>
+    <div class="row2">
+      <div class="field"><label>Pets at home</label><input id="tr-pets" placeholder="Dog, cat…"></div>
+      <div class="field"><label>Best times for a visit</label><input id="tr-avail" placeholder="Weekdays after 3pm"></div>
+    </div>
+    <button class="btn pri full big" id="tr-go">Submit request</button>
+    <div class="s" style="text-align:center;margin-top:10px;color:var(--muted)">No account needed — this goes straight to the maintenance team.</div>
+  </div></div>`;
+  const ph = document.getElementById('tr-photos');
+  ph.onchange = () => {
+    if (ph.files.length > 3) { toast('Please choose up to 3 photos'); ph.value = ''; return; }
+    document.getElementById('tr-photo-count').textContent = ph.files.length ? ph.files.length + ' photo' + (ph.files.length > 1 ? 's' : '') + ' attached' : '';
+  };
+  document.getElementById('tr-go').onclick = async () => {
+    const btn = document.getElementById('tr-go');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    const fd = new FormData();
+    const set = (k, v) => fd.append(k, v);
+    set('category', fv('tr-cat')); set('description', fv('tr-desc'));
+    set('reported_by', fv('tr-name')); set('reporter_phone', fv('tr-phone')); set('reporter_email', fv('tr-email'));
+    const un = document.getElementById('tr-unit'); if (un && un.value) set('unit_id', un.value);
+    set('is_emergency', fchk('tr-emerg') ? '1' : '0');
+    set('flag_water', fchk('trf-water') ? '1' : '0'); set('flag_electrical', fchk('trf-elec') ? '1' : '0');
+    set('flag_hvac_out', fchk('trf-hvac') ? '1' : '0'); set('flag_safety', fchk('trf-safety') ? '1' : '0');
+    set('permission_to_enter', fchk('tr-pte') ? '1' : '0');
+    set('access_instructions', fv('tr-access')); set('pets', fv('tr-pets')); set('preferred_availability', fv('tr-avail'));
+    for (const f of ph.files) fd.append('photos', f);
+    try {
+      const r = await fetch('/api/intake/' + encodeURIComponent(token), { method: 'POST', body: fd });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || 'Something went wrong');
+      $app.innerHTML = `<div class="login-wrap"><div class="login-card" style="text-align:center">
+        <div style="font-size:48px;margin-bottom:8px">${data.emergency ? '🚨' : '✅'}</div>
+        <h3 style="margin-bottom:6px">Request received</h3>
+        <div class="s" style="margin-bottom:12px">Reference <b>${esc(data.reference)}</b>. ${data.emergency ? 'Marked as an emergency — the maintenance team has been alerted.' : 'The maintenance team has been notified and will follow up.'}</div>
+        <div class="s" style="color:var(--muted)">You can close this page. Save the link to report future issues.</div>
+      </div></div>`;
+    } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = 'Submit request'; }
+  };
+}
+
 /* ---------------- onboarding ---------------- */
 async function renderOnboarding() {
   await bootMeta();
@@ -258,7 +336,7 @@ async function renderOnboarding() {
 async function bootMeta() { try { META = await GET('/meta'); } catch (e) {} await refreshUnread(); }
 
 /* ---------------- dashboard: Attention Center ---------------- */
-const ATTN_ICO = { emergency: '🚨', approval: '💵', overdue: '⏰', triage: '📥', repeat: '↻', pm: '🔁', anomaly: '💸', rvr: '🔄', quote: '📋' };
+const ATTN_ICO = { emergency: '🚨', approval: '💵', overdue: '⏰', triage: '📥', owner_review: '👤', repeat: '↻', pm: '🔁', anomaly: '💸', rvr: '🔄', quote: '📋' };
 async function renderDashboard() {
   loadingShell('#/dashboard');
   const d = await GET('/dashboard');
@@ -325,8 +403,9 @@ async function renderMaintenance() {
   loadingShell('#/maintenance');
   const [reqs, pm] = await Promise.all([GET('/requests'), GET('/pm')]);
   const open = reqs.filter(r => r.status === 'open');
+  const ownerRev = reqs.filter(r => r.status === 'owner_review');
   const info = reqs.filter(r => r.status === 'info_needed');
-  const closed = reqs.filter(r => !['open', 'info_needed'].includes(r.status)).slice(0, 8);
+  const closed = reqs.filter(r => !['open', 'info_needed', 'owner_review'].includes(r.status)).slice(0, 8);
   const today = new Date().toISOString().slice(0, 10);
   const flags = r => [r.is_emergency && '🚨 Emergency', r.flag_safety && '⚠ Safety', r.flag_water && '💧 Water', r.flag_electrical && '⚡ Electrical', r.flag_hvac_out && '❄ HVAC out'].filter(Boolean);
 
@@ -337,8 +416,13 @@ async function renderMaintenance() {
       <div style="font-size:14px">${esc(r.description)}</div>
       ${flags(r).length ? `<div class="s" style="margin-top:4px;font-weight:700;color:#9A6B00">${flags(r).join(' · ')}</div>` : ''}
       <div class="s" style="margin-top:3px;color:var(--muted)">${esc(r.reported_by || '')}${r.reporter_phone ? ' · ' + esc(r.reporter_phone) : ''}${r.access_instructions ? ' · ' + esc(r.access_instructions) : ''}${r.pets ? ' · Pets: ' + esc(r.pets) : ''}${r.preferred_availability ? ' · ' + esc(r.preferred_availability) : ''}</div>
+      ${r.photos && r.photos.length ? `<div class="photo-row" style="margin-top:7px">${r.photos.map(p => `<img src="${p.url}" loading="lazy" onclick="window.open('${p.url}')">`).join('')}</div>` : ''}
       ${r.status === 'info_needed' ? `<div class="s" style="color:var(--amber);font-weight:700;margin-top:3px">Waiting for more information${r.triage_note ? ': ' + esc(r.triage_note) : ''}</div>` : ''}
-      ${canWrite() ? `<div class="pill-row">
+      ${r.status === 'owner_review' ? (ME.role === 'owner' ? `<div class="pill-row">
+        <button class="btn pri" onclick="ownerReview(${r.id},'release')">✓ Send to maintenance</button>
+        <button class="btn danger" onclick="ownerReview(${r.id},'reject')">Decline</button>
+      </div>` : `<div class="s" style="margin-top:6px;font-weight:700;color:#9A6B00">👤 Held for owner review — the owner decides whether this goes to maintenance.</div>`)
+      : canWrite() ? `<div class="pill-row">
         <button class="btn pri" onclick="triageConvert(${r.id})">→ Work order</button>
         <button class="btn sec" onclick="triagePriority(${r.id},'${r.priority}')">Priority</button>
         <button class="btn sec" onclick="triageNote(${r.id},'info','Request more information')">Need info</button>
@@ -348,8 +432,9 @@ async function renderMaintenance() {
     </div></div>`;
 
   shell(`
-    <div class="section-title" style="margin-top:0">Needs triage ${canWrite() ? `<button class="btn pri" style="padding:8px 14px" id="r-new">+ Request</button>` : ''}</div>
-    ${open.length ? open.map(reqCard).join('') : `<div class="card empty">No requests waiting for triage.<br><br>${canWrite() ? '<button class="btn pri" id="r-new2">Create a maintenance request</button>' : ''}</div>`}
+    ${ownerRev.length ? `<div class="section-title" style="margin-top:0">👤 Waiting for owner review</div>${ownerRev.map(reqCard).join('')}` : ''}
+    <div class="section-title" ${ownerRev.length ? '' : 'style="margin-top:0"'}>Needs triage ${canWrite() || ME.role === 'viewer' ? `<button class="btn pri" style="padding:8px 14px" id="r-new">+ Request</button>` : ''}</div>
+    ${open.length ? open.map(reqCard).join('') : `<div class="card empty">No requests waiting for triage.<br><br>${canWrite() || ME.role === 'viewer' ? '<button class="btn pri" id="r-new2">Create a maintenance request</button>' : ''}</div>`}
     ${info.length ? `<div class="section-title">Waiting on information</div>${info.map(reqCard).join('')}` : ''}
     ${closed.length ? `<div class="section-title">Recently triaged</div><div class="card">
       ${closed.map(r => `<div class="list-item"><div class="body"><div class="t" style="color:var(--muted)">${esc(r.description.slice(0, 70))}</div><div class="s">${esc(r.property_name)}</div></div><div class="end">${chip(r.status)}${r.work_order_id ? `<div><a class="more" href="#/work-orders/${r.work_order_id}" style="font-size:12px">View WO ›</a></div>` : ''}</div></div>`).join('')}
@@ -416,6 +501,16 @@ function intakeModal() {
   };
 }
 
+window.ownerReview = (id, action) => {
+  modal(`<h3>${action === 'release' ? 'Send to maintenance' : 'Decline this request'}</h3>
+    <div class="s" style="margin-bottom:10px">${action === 'release' ? 'Your maintenance team will be notified and it enters the normal triage queue.' : 'The request is closed. Your note is kept on the record.'}</div>
+    <div class="field"><label>Note (optional)</label><textarea id="or-note"></textarea></div>
+    <button class="btn pri full" id="or-go">${action === 'release' ? 'Send to maintenance' : 'Decline request'}</button>`);
+  document.getElementById('or-go').onclick = async () => {
+    try { await POST(`/requests/${id}/review`, { action, note: fv('or-note') }); closeModal(); toast(action === 'release' ? 'Sent to maintenance' : 'Request declined'); render(); }
+    catch (e) { toast(e.message); }
+  };
+};
 window.triageConvert = id => {
   modal(`<h3>Create work order</h3>
     <div class="field"><label>Work order title</label><input id="tc-title" placeholder="Short, specific title"></div>
@@ -1004,6 +1099,22 @@ async function renderPropertyDetail(id, qs) {
         ${d.health.reasons.length ? d.health.reasons.map(r => `<div class="hr-item"><span class="pts">${r.points}</span> ${esc(r.reason)}</div>`).join('') : '<div class="s">No issues detected — score reflects a clean recent record.</div>'}
         <div class="s" style="margin-top:8px;color:var(--muted)">Score starts at 100 and subtracts for open issues, overdue work, emergencies, repeat repairs, aging equipment, and cost spikes.</div>
       </div>
+      ${canWrite() ? `<div class="card" style="border-left:4px solid var(--pine)">
+        <div class="card-title">Tenant request link</div>
+        <div class="s" style="margin-bottom:10px">Tenants report issues here — no app, no login. Text them the link once, or print the QR for the laundry room and unit doors. Requests land in your triage queue with photos and access details.</div>
+        <div class="field"><input value="${location.origin}/#/report/${esc(p.intake_token)}" readonly onclick="this.select()"></div>
+        <div class="row2">
+          <button class="btn pri full" onclick="navigator.clipboard.writeText('${location.origin}/#/report/${esc(p.intake_token)}');toast('Tenant link copied')">Copy link</button>
+          <button class="btn sec full" onclick="showQR('intake',${p.id})">Print QR poster</button>
+        </div>
+        <button class="btn sec full" style="margin-top:8px" onclick="rotateIntake(${p.id})">Reset link (old one stops working)</button>
+        <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px">
+          <div class="s" style="font-weight:700;margin-bottom:6px">Where do tenant requests go first?</div>
+          <div class="tglrow"><span>Straight to maintenance triage</span><input type="radio" name="rt${p.id}" class="tgl" ${p.tenant_routing !== 'owner' ? 'checked' : ''} onchange="setRouting(${p.id},'maintenance')" ${ME.role === 'owner' ? '' : 'disabled'}></div>
+          <div class="tglrow"><span>Owner reviews first, then releases to maintenance</span><input type="radio" name="rt${p.id}" class="tgl" ${p.tenant_routing === 'owner' ? 'checked' : ''} onchange="setRouting(${p.id},'owner')" ${ME.role === 'owner' ? '' : 'disabled'}></div>
+          <div class="s" style="color:var(--muted);margin-top:4px">Emergencies always go straight to maintenance regardless of this setting.${ME.role === 'owner' ? '' : ' Only an owner can change routing.'}</div>
+        </div>
+      </div>` : ''}
       <div class="card">
         <div class="card-title">Units (${d.units.length}) ${canWrite() ? `<button class="more" onclick="addUnit(${p.id})">+ Add ›</button>` : ''}</div>
         ${d.units.map(u => `<div class="list-item"><div class="body"><div class="t">Unit ${esc(u.label)}</div><div class="s">${u.beds || '—'} bd · ${u.baths || '—'} ba${u.sqft ? ' · ' + u.sqft + ' sqft' : ''}</div></div><div class="end">${u.occupied ? '<span class="chip completed">Occupied</span>' : '<span class="chip cancelled">Vacant</span>'}</div></div>`).join('') || '<div class="s">No units recorded.</div>'}
@@ -1059,6 +1170,13 @@ async function renderPropertyDetail(id, qs) {
   if (tu) tu.onchange = () => location.hash = `#/properties/${id}?tab=timeline&cat=${encodeURIComponent(tlCat)}&unit=${tu.value}`;
 }
 
+window.setRouting = async (pid, mode) => {
+  try { await PATCH('/properties/' + pid, { tenant_routing: mode }); toast(mode === 'owner' ? 'Tenant requests now go to the owner first' : 'Tenant requests go straight to maintenance'); }
+  catch (e) { toast(e.message); render(); }
+};
+window.rotateIntake = pid => confirmModal('Reset the tenant link?', 'The current link and any printed QR codes stop working immediately. Use this if the link leaked or a tenant moved out on bad terms.', async () => {
+  try { await POST(`/properties/${pid}/intake-token/rotate`, {}); closeModal(); toast('New tenant link generated'); render(); } catch (e) { toast(e.message); }
+}, 'Reset link');
 window.showQR = (kind, id) => {
   modal(`<h3>Printable QR label</h3>
     <div style="text-align:center;padding:8px"><img src="/api/qr/${kind}/${id}" style="width:220px;height:220px"></div>
@@ -1560,6 +1678,7 @@ function openSearch() {
 async function render() {
   const hash = location.hash || '#/';
   const [path, qs] = hash.split('?');
+  if (path.startsWith('#/report/')) return renderReport(path.split('/')[2]);
   if (!ME) {
     if (path.startsWith('#/join')) return renderJoin(qs);
     try { ME = await GET('/auth/me'); await bootMeta(); }
