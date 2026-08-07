@@ -175,6 +175,22 @@ function ok(cond, name, extra) {
   ok(rot.status === 200 && rot.data.intake_token !== tok, 'token rotation issues a new link');
   ok((await fetch(BASE + '/intake/' + tok)).status === 404, 'old link dead after rotation');
 
+  console.log('\nPHONE PUSH');
+  const vk = await call('owner', 'GET', '/push/vapid-public-key');
+  ok(vk.status === 200 && vk.data.key && vk.data.key.length > 40, 'VAPID public key served');
+  ok((await call('anon2', 'GET', '/push/vapid-public-key')).status === 401, 'push endpoints require sign-in');
+  const subR = await call('owner', 'POST', '/push/subscribe', { subscription: { endpoint: 'https://fcm.googleapis.com/fcm/send/AUTOTEST-dev', keys: { p256dh: 'x', auth: 'y' } } });
+  ok(subR.status === 200 && subR.data.devices >= 1, 'device subscription stored');
+  ok((await call('owner', 'POST', '/push/subscribe', { subscription: {} })).status === 400, 'invalid subscription rejected');
+  ok((await call('owner', 'PATCH', '/push/pushover-key', { key: 'AUTOTESTKEY123' })).status === 200, 'pushover key saved');
+  ok((await call('owner', 'GET', '/push/status')).data.pushover_configured === true, 'pushover status reflects saved key');
+  const unsub = await call('owner', 'POST', '/push/unsubscribe', { subscription: { endpoint: 'https://fcm.googleapis.com/fcm/send/AUTOTEST-dev' } });
+  ok(unsub.status === 200 && unsub.data.devices === 0, 'device unsubscribed');
+  await call('owner', 'PATCH', '/push/pushover-key', { key: '' });
+  const pp = await call('owner', 'PUT', '/notification-prefs', { emergency: { in_app: 1, push: 0 } });
+  ok(pp.status === 200 && (await call('owner', 'GET', '/notification-prefs')).data.emergency.push === 0, 'per-kind push preference persists');
+  await call('owner', 'PUT', '/notification-prefs', { emergency: { in_app: 1, push: 1 } });
+
   console.log('\nINSIGHTS & QR');
   const an = (await call('owner', 'GET', '/analytics?capex_months=60')).data;
   ok(an.capex.window_months === 60, 'CapEx horizon switches to 60 months');
