@@ -108,6 +108,49 @@ function shell(content, route) {
 }
 function loadingShell(route) { shell('<div class="skel"></div><div class="skel"></div><div class="skel" style="height:180px"></div>', route); }
 
+/* ---- phone push (web push) ---- */
+function pushSupported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+function isIOSNotInstalled() {
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const installed = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+  return ios && !installed;
+}
+function urlB64ToUint8(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+async function enablePush() {
+  if (isIOSNotInstalled()) {
+    modal(`<h3>One step first (iPhone)</h3>
+      <div class="s" style="margin-bottom:10px">iPhones only allow notifications for installed web apps. Takes 10 seconds:</div>
+      <div class="s" style="line-height:1.9">1. Tap the <b>Share</b> button in Safari<br>2. Choose <b>Add to Home Screen</b><br>3. Open <b>Steadhold</b> from your home screen<br>4. Come back here and tap Enable again</div>
+      <button class="btn pri full" style="margin-top:14px" onclick="closeModal()">Got it</button>`);
+    return false;
+  }
+  if (!pushSupported()) { toast('This browser does not support push notifications'); return false; }
+  try {
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { toast('Notifications were not allowed — check your browser settings'); return false; }
+    const reg = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+    const { key } = await GET('/push/vapid-public-key');
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(key) });
+    const r = await POST('/push/subscribe', { subscription: sub.toJSON() });
+    toast('Phone notifications on for this device' + (r.devices > 1 ? ` (${r.devices} devices total)` : ''));
+    return true;
+  } catch (e) { toast('Could not enable notifications: ' + e.message); return false; }
+}
+async function disablePush() {
+  try {
+    const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+    const sub = reg && await reg.pushManager.getSubscription();
+    if (sub) { await POST('/push/unsubscribe', { subscription: sub.toJSON() }); await sub.unsubscribe(); }
+    toast('Phone notifications off for this device');
+  } catch (e) { toast(e.message); }
+}
+window.enablePush = enablePush; window.disablePush = disablePush;
+
 async function doLogout() {
   try { await POST('/auth/logout', {}); } catch (e) {}
   ME = null; location.hash = '#/login'; location.reload();
@@ -1499,19 +1542,40 @@ const NOTIF_KINDS = [['emergency', 'Emergency requests'], ['assigned', 'Job assi
   ['approval_decision', 'Approval decisions'], ['completed', 'Jobs completed'], ['quote', 'Vendor quotes'],
   ['pm_due', 'Preventive maintenance due'], ['repeat', 'Repeat-repair warnings'], ['request', 'New maintenance requests'], ['high_cost', 'Unusually high costs']];
 async function mountNotifPrefs(slotId) {
-  const prefs = await GET('/notification-prefs');
+  const [prefs, status] = await Promise.all([GET('/notification-prefs'), GET('/push/status').catch(() => ({ devices: 0 }))]);
   const slot = document.getElementById(slotId);
   if (!slot) return;
   slot.innerHTML = `
-    <div class="s" style="margin-bottom:6px">Choose what appears in your in-app feed. Email and text delivery are coming — your choices here will carry over.</div>
-    ${NOTIF_KINDS.map(([k, l]) => `<div class="tglrow"><span>${l}</span><input type="checkbox" class="tgl npk" data-k="${k}" ${prefs[k] && prefs[k].in_app ? 'checked' : ''}></div>`).join('')}
+    <div style="border:1.5px solid var(--line);border-radius:12px;padding:12px 13px;margin-bottom:14px">
+      <div style="font-weight:700;margin-bottom:4px">📱 Phone notifications</div>
+      <div class="s" style="margin-bottom:10px">${status.devices ? `On for ${status.devices} device${status.devices > 1 ? 's' : ''}. Emergencies, assignments, and approvals reach your phone even when the app is closed.` : 'Get alerts on your phone even when the app is closed — emergencies, new assignments, approvals.'}</div>
+      <div class="row2">
+        <button class="btn pri full" onclick="enablePush().then(ok=>ok&&render())">${status.devices ? 'Add this device' : 'Enable on this device'}</button>
+        ${status.devices ? `<button class="btn sec full" onclick="disablePush().then(()=>render())">Turn off this device</button>` : '<span></span>'}
+      </div>
+      <details style="margin-top:10px"><summary class="s" style="cursor:pointer;font-weight:600">Also use Pushover${status.pushover_configured ? ' ✓ connected' : ''}</summary>
+        <div class="s" style="margin:8px 0 6px">${status.pushover_available ? 'Paste your Pushover user key to also receive alerts through the Pushover app.' : 'Ask your admin to set the PUSHOVER_TOKEN environment variable on the server, then paste your Pushover user key here.'}</div>
+        <div class="field"><input id="po-key" placeholder="Pushover user key" value=""></div>
+        <button class="btn sec full" onclick="savePushover()">Save Pushover key</button>
+      </details>
+    </div>
+    <div class="s" style="margin-bottom:6px;font-weight:700">What to send, per channel</div>
+    <div class="tglrow" style="font-size:12px;color:var(--muted);font-weight:700"><span></span><span style="display:flex;gap:22px"><span>In-app</span><span>Phone</span></span></div>
+    ${NOTIF_KINDS.map(([k, l]) => `<div class="tglrow"><span>${l}</span><span style="display:flex;gap:34px">
+      <input type="checkbox" class="tgl npk" data-k="${k}" ${prefs[k] && prefs[k].in_app ? 'checked' : ''}>
+      <input type="checkbox" class="tgl npp" data-k="${k}" ${prefs[k] && prefs[k].push ? 'checked' : ''}>
+    </span></div>`).join('')}
     <button class="btn pri full" style="margin-top:10px" id="np-save">Save preferences</button>`;
   document.getElementById('np-save').onclick = async () => {
     const body = {};
-    document.querySelectorAll('.npk').forEach(c => body[c.dataset.k] = { in_app: c.checked, email: 0, sms: 0 });
+    document.querySelectorAll('.npk').forEach(c => body[c.dataset.k] = { in_app: c.checked, push: 0, email: 0, sms: 0 });
+    document.querySelectorAll('.npp').forEach(c => { if (body[c.dataset.k]) body[c.dataset.k].push = c.checked ? 1 : 0; });
     try { await PUT('/notification-prefs', body); toast('Preferences saved'); } catch (e) { toast(e.message); }
   };
 }
+window.savePushover = async () => {
+  try { await PATCH('/push/pushover-key', { key: fv('po-key') }); toast('Pushover key saved'); render(); } catch (e) { toast(e.message); }
+};
 
 /* ---------------- settings ---------------- */
 async function renderSettings(qs) {
