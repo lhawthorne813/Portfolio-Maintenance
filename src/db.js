@@ -424,6 +424,26 @@ function migrateV2() {
     MIGRATION_LOG.push('work_orders: number uniqueness changed from global to per-organization');
   }
 
+  // Tenant intake: public per-property tokens + photos attachable to requests
+  if (!hasColumn('properties', 'intake_token')) {
+    db.exec(`ALTER TABLE properties ADD COLUMN intake_token TEXT`);
+    MIGRATION_LOG.push('properties: added intake_token (public tenant request links)');
+  }
+  if (!hasColumn('properties', 'tenant_routing')) {
+    db.exec(`ALTER TABLE properties ADD COLUMN tenant_routing TEXT DEFAULT 'maintenance'`);
+    MIGRATION_LOG.push("properties: added tenant_routing ('maintenance' or 'owner' — owner reviews tenant requests first)");
+  }
+  if (!hasColumn('photos', 'request_id')) {
+    db.exec(`ALTER TABLE photos ADD COLUMN request_id INTEGER REFERENCES requests(id)`);
+    MIGRATION_LOG.push('photos: added request_id (tenant intake photos)');
+  }
+  {
+    const crypto = require('crypto');
+    const untokened = db.prepare('SELECT id FROM properties WHERE intake_token IS NULL').all();
+    const setTok = db.prepare('UPDATE properties SET intake_token=? WHERE id=?');
+    for (const p of untokened) setTok.run(crypto.randomBytes(9).toString('hex'), p.id);
+  }
+
   // Backfill: assign all pre-V2 records to the default demo organization
   const anyUser = db.prepare('SELECT COUNT(*) c FROM users').get().c;
   const unscoped = anyUser && db.prepare('SELECT COUNT(*) c FROM users WHERE organization_id IS NULL').get().c;

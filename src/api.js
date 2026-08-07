@@ -211,6 +211,73 @@ router.post('/auth/accept-invite', (req, res) => {
   res.json({ ok: true, role: inv.role });
 });
 
+/* =====================================================================
+   PUBLIC TENANT INTAKE — no login. Reached via unguessable per-property
+   tokens (shared as links or printed QR codes). Lightly rate-limited.
+===================================================================== */
+const intakeHits = new Map();   // ip -> [timestamps]
+function intakeRateLimit(req, res, next) {
+  const ip = req.ip || 'x';
+  const nowMs = Date.now();
+  const hits = (intakeHits.get(ip) || []).filter(t => nowMs - t < 3600_000);
+  if (hits.length >= 12) return res.status(429).json({ error: 'Too many requests — please wait a bit and try again, or call your property manager directly.' });
+  hits.push(nowMs); intakeHits.set(ip, hits);
+  next();
+}
+function intakeProp(token) {
+  if (!token || token.length < 8) return null;
+  return db.prepare(`SELECT p.*, o.name AS org_name FROM properties p JOIN organizations o ON o.id=p.organization_id
+    WHERE p.intake_token=? AND p.active=1`).get(token);
+}
+// Minimal public info: enough to render the form, nothing about the portfolio
+router.get('/intake/:token', (req, res) => {
+  const p = intakeProp(req.params.token);
+  if (!p) return notFound(res);
+  res.json({
+    property: p.name, org: p.org_name,
+    units: db.prepare('SELECT id,label FROM units WHERE property_id=? ORDER BY label').all(p.id),
+    categories: ['Plumbing', 'HVAC', 'Electrical', 'Appliance', 'Roofing', 'Pest', 'Safety', 'General']
+  });
+});
+router.post('/intake/:token', intakeRateLimit, upload.array('photos', 3), (req, res) => {
+  const p = intakeProp(req.params.token);
+  if (!p) return notFound(res);
+  const b = req.body || {};
+  const desc = (b.description || '').trim().slice(0, 2000);
+  if (!b.category || !desc) return res.status(400).json({ error: 'Please choose a category and describe the issue' });
+  if (!b.reported_by || !b.reporter_phone) return res.status(400).json({ error: 'Please include your name and phone number so we can reach you' });
+  if (b.unit_id && !db.prepare('SELECT 1 FROM units WHERE id=? AND property_id=?').get(b.unit_id, p.id)) return res.status(400).json({ error: 'Invalid unit' });
+  const emergency = b.is_emergency === '1' || b.is_emergency === 'true' || b.is_emergency === true;
+  // Owner-review routing: non-emergency tenant requests can be held for the owner before maintenance sees them.
+  const ownerFirst = p.tenant_routing === 'owner' && !emergency;
+  const id = db.prepare(`INSERT INTO requests (organization_id,property_id,unit_id,category,description,priority,
+      reported_by,reporter_type,reporter_phone,reporter_email,access_instructions,permission_to_enter,pets,
+      preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,status,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(p.organization_id, p.id, +b.unit_id || null, b.category, desc, emergency ? 'emergency' : 'normal',
+      String(b.reported_by).slice(0, 120), 'tenant', String(b.reporter_phone).slice(0, 40), (b.reporter_email || '').slice(0, 120) || null,
+      (b.access_instructions || '').slice(0, 300) || null, (b.permission_to_enter === '1' || b.permission_to_enter === 'true') ? 1 : 0,
+      (b.pets || '').slice(0, 120) || null, (b.preferred_availability || '').slice(0, 200) || null,
+      emergency ? 1 : 0, b.flag_safety === '1' ? 1 : 0, b.flag_water === '1' ? 1 : 0,
+      b.flag_electrical === '1' ? 1 : 0, b.flag_hvac_out === '1' ? 1 : 0,
+      ownerFirst ? 'owner_review' : 'open', now()).lastInsertRowid;
+  for (const f of (req.files || []))
+    db.prepare(`INSERT INTO photos (organization_id,request_id,property_id,kind,url,caption,created_at)
+      VALUES (?,?,?,?,?,?,?)`).run(p.organization_id, id, p.id, 'general', '/uploads/' + f.filename, 'Tenant intake photo', now());
+  // Notify the right audience: owner-review requests alert owners only; everything else alerts management.
+  const photoNote = req.files && req.files.length ? ` · ${req.files.length} photo${req.files.length > 1 ? 's' : ''}` : '';
+  if (ownerFirst) {
+    notify(p.organization_id, ownerIds(p.organization_id), 'request',
+      `Tenant request awaiting your review: ${b.category}`,
+      `${p.name} — ${desc.slice(0, 120)}${photoNote} · Held until you send it to maintenance.`, '#/maintenance');
+  } else {
+    notify(p.organization_id, mgmtIds(p.organization_id), 'request',
+      emergency ? `🚨 EMERGENCY tenant request: ${b.category}` : `New tenant request: ${b.category}`,
+      `${p.name} — ${desc.slice(0, 120)}${photoNote}`, '#/maintenance');
+  }
+  res.json({ ok: true, reference: 'REQ-' + id, emergency });
+});
+
 router.use(requireAuth);
 
 /* =====================================================================
@@ -344,6 +411,9 @@ router.get('/dashboard', MGMT_READ, (req, res) => {
     items: late.map(w => ({ t: w.title, s: `${w.property_name} · due ${w.due_date}`, link: '#/work-orders/' + w.id })) });
   const triage = db.prepare(`SELECT COUNT(*) c FROM requests WHERE organization_id=? AND status='open'`).get(O).c;
   if (triage) attention.push({ type: 'triage', count: triage, title: `${triage} request${triage > 1 ? 's' : ''} need triage`, items: [], link: '#/maintenance' });
+  const ownerRev = db.prepare(`SELECT COUNT(*) c FROM requests WHERE organization_id=? AND status='owner_review'`).get(O).c;
+  if (ownerRev && req.user.role !== 'manager') attention.push({ type: 'owner_review', count: ownerRev,
+    title: `${ownerRev} tenant request${ownerRev > 1 ? 's' : ''} awaiting owner review`, items: [], link: '#/maintenance' });
   const repeats = I.repeatRepairs(O);
   if (repeats.length) attention.push({ type: 'repeat', count: repeats.length, title: `${repeats.length} repeat-repair warning${repeats.length > 1 ? 's' : ''}`,
     items: repeats.map(r => ({ t: `${r.category} at ${r.property}`, s: `${r.count} calls / ${r.window} · $${r.total_spent.toLocaleString()}`, link: '#/properties/' + r.property_id })) });
@@ -466,6 +536,11 @@ router.patch('/properties/:id', MGMT_WRITE, (req, res) => {
   const fields = ['name', 'address', 'city', 'state', 'zip', 'type', 'year_built', 'notes', 'active'];
   const sets = [], vals = [];
   for (const f of fields) if (f in req.body) { sets.push(`${f}=?`); vals.push(req.body[f]); }
+  if ('tenant_routing' in req.body) {
+    if (!['maintenance', 'owner'].includes(req.body.tenant_routing)) return res.status(400).json({ error: 'Invalid routing option' });
+    if (req.body.tenant_routing === 'owner' && req.user.role !== 'owner') return res.status(403).json({ error: 'Only an owner can route tenant requests to owner review' });
+    sets.push('tenant_routing=?'); vals.push(req.body.tenant_routing);
+  }
   if (sets.length) { vals.push(p.id); db.prepare(`UPDATE properties SET ${sets.join(',')} WHERE id=?`).run(...vals); }
   res.json({ ok: true });
 });
@@ -535,6 +610,18 @@ router.get('/qr/asset/:id', (req, res, next) => req.user.role === 'vendor' ? not
   if (!a) return notFound(res);
   await sendQR(res, `${req.protocol}://${req.get('host')}/#/scan/asset/${a.id}`, 'ASSET-' + a.id);
 });
+router.get('/qr/intake/:id', MGMT_READ, async (req, res) => {
+  const p = db.prepare('SELECT id,intake_token FROM properties WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!p) return notFound(res);
+  await sendQR(res, `${req.protocol}://${req.get('host')}/#/report/${p.intake_token}`, 'REPORT-ISSUE');
+});
+router.post('/properties/:id/intake-token/rotate', MGMT_WRITE, (req, res) => {
+  const p = db.prepare('SELECT id FROM properties WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!p) return notFound(res);
+  const tok = crypto.randomBytes(9).toString('hex');
+  db.prepare('UPDATE properties SET intake_token=? WHERE id=?').run(tok, p.id);
+  res.json({ intake_token: tok });
+});
 router.get('/qr/unit/:id', MGMT_READ, async (req, res) => {
   const u = db.prepare('SELECT id,property_id FROM units WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
   if (!u) return notFound(res);
@@ -550,10 +637,12 @@ router.get('/requests', MGMT_READ, (req, res) => {
     WHERE r.organization_id=?
     ORDER BY r.status='open' DESC, r.is_emergency DESC,
       CASE r.priority WHEN 'emergency' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, r.created_at DESC`).all(req.oid);
-  res.json(rows);
+  const ph = db.prepare('SELECT id,url FROM photos WHERE request_id=?');
+  res.json(rows.map(r => ({ ...r, photos: ph.all(r.id) })));
 });
 router.post('/requests', (req, res) => {
-  if (req.user.role === 'vendor' || req.user.role === 'viewer') return res.status(403).json({ error: 'Not permitted for your role' });
+  // Vendors can't file requests. Viewers (owner/investor read-only role) CAN — it's their single write permission.
+  if (req.user.role === 'vendor') return res.status(403).json({ error: 'Not permitted for your role' });
   const b = req.body || {};
   const prop = db.prepare('SELECT id,name FROM properties WHERE id=? AND organization_id=?').get(b.property_id, req.oid);
   if (!prop) return notFound(res);
@@ -565,7 +654,7 @@ router.post('/requests', (req, res) => {
       preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,created_by,created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(req.oid, prop.id, b.unit_id || null, b.category, b.description, pri,
-      b.reported_by || req.user.name, b.reporter_type || 'manager', b.reporter_phone || null, b.reporter_email || null,
+      b.reported_by || req.user.name, b.reporter_type || (req.user.role === 'viewer' ? 'owner' : 'manager'), b.reporter_phone || null, b.reporter_email || null,
       b.access_instructions || null, b.permission_to_enter ? 1 : 0, b.pets || null,
       b.preferred_availability || null, b.is_emergency ? 1 : 0,
       b.flag_safety ? 1 : 0, b.flag_water ? 1 : 0, b.flag_electrical ? 1 : 0, b.flag_hvac_out ? 1 : 0,
@@ -582,8 +671,29 @@ function getReqOr404(req, res) {
   return r;
 }
 // Triage actions in one endpoint: convert | reject | duplicate | info | priority
+// Owner review gate: only an owner can release a held request to maintenance (or reject it)
+router.post('/requests/:id/review', requireRole('owner'), (req, res) => {
+  const r = getReqOr404(req, res); if (!r) return;
+  if (r.status !== 'owner_review') return res.status(400).json({ error: 'This request is not waiting for owner review' });
+  const { action } = req.body || {};
+  if (action === 'release') {
+    db.prepare(`UPDATE requests SET status='open', triage_note=? WHERE id=?`).run(req.body.note || null, r.id);
+    const prop = db.prepare('SELECT name FROM properties WHERE id=?').get(r.property_id);
+    notify(req.oid, mgmtIds(req.oid).filter(id => id !== req.user.id), 'request',
+      `Owner-approved request: ${r.category}`, `${prop.name} — ${r.description.slice(0, 120)}`, '#/maintenance');
+    return res.json({ ok: true });
+  }
+  if (action === 'reject') {
+    db.prepare(`UPDATE requests SET status='rejected', triage_note=? WHERE id=?`).run(req.body.note || null, r.id);
+    return res.json({ ok: true });
+  }
+  res.status(400).json({ error: 'Unknown review action' });
+});
+
 router.post('/requests/:id/triage', MGMT_WRITE, (req, res) => {
   const r = getReqOr404(req, res); if (!r) return;
+  if (r.status === 'owner_review')
+    return res.status(403).json({ error: 'This request is waiting for the owner to review it first' });
   if (!['open', 'info_needed'].includes(r.status))
     return res.status(400).json({ error: `This request has already been ${r.status === 'converted' ? 'converted to a work order' : 'closed'}` });
   const { action } = req.body || {};
@@ -610,7 +720,8 @@ router.post('/requests/:id/triage', MGMT_WRITE, (req, res) => {
         instructions || null, r.priority, status, b.assigned_user_id || null, b.assigned_vendor_id || null,
         b.scheduled_date || null, b.due_date || null, +b.estimated_minutes || 60, 'request', req.user.id, now()).lastInsertRowid;
     db.prepare(`UPDATE requests SET status='converted', work_order_id=? WHERE id=?`).run(woId, r.id);
-    hist(req.oid, woId, req.user.id, 'created', `Converted from request #${r.id}`);
+    const carried = db.prepare('UPDATE photos SET work_order_id=? WHERE request_id=?').run(woId, r.id).changes;
+    hist(req.oid, woId, req.user.id, 'created', `Converted from request #${r.id}` + (carried ? ` (${carried} tenant photo${carried > 1 ? 's' : ''} attached)` : ''));
     if (b.assigned_user_id) {
       hist(req.oid, woId, req.user.id, 'assigned', 'Assigned during triage');
       notify(req.oid, b.assigned_user_id, 'assigned', 'New job assigned', `${num} — ${b.title || r.description.slice(0, 60)}`, '#/work-orders/' + woId);
