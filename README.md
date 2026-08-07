@@ -1,54 +1,49 @@
-# OpsDeck — Property Maintenance Operations Platform
+# OpsDeck V2 — Property Maintenance Operations Platform
 
-A mobile-first maintenance operations app for rental-property investors (20–200 units) and their maintenance teams. Not property management software — no rent, leasing, or accounting. It answers two questions: **"What should I do next?"** (technician) and **"What needs my attention?"** (owner).
+Multi-tenant maintenance operations for small rental portfolios: intake → triage → work orders → completion enforcement → analytics, with roles for owners, managers, technicians, vendors, and read-only viewers.
 
-## Demo logins (password for all: `demo123`)
-
-| Role | Email | Sees |
-|---|---|---|
-| Owner | owner@demo.com | Full portfolio, analytics, approvals |
-| Manager | manager@demo.com | Same operational views as owner |
-| Technician | tech@demo.com | Only their assigned jobs (Mike Torres) |
-| Vendor | vendor@demo.com | Only Coastal HVAC Pros jobs |
-
-Demo data seeds automatically on first boot: 15 Jacksonville properties, ~40 units, 4 technicians, 3 vendors, 40+ work orders, assets, PM schedules, expenses, and two live repeat-repair patterns (Oak Haven HVAC, Avondale cast-iron plumbing).
-
-## Run locally
-
+## Quick start (local)
 ```bash
 npm install
-npm start          # http://localhost:3000
-npm run seed       # optional: wipe and re-seed demo data
+node server.js          # http://localhost:3000
+node test/api.test.js   # run the 57-check test suite (server must be running)
 ```
 
-## Deploy to Railway
+## Demo logins (password: `demo123`)
+| Role | Email | Sees |
+|---|---|---|
+| Owner | owner@demo.com | Everything, incl. owner-tier approvals & org settings |
+| Manager | manager@demo.com | Day-to-day ops, triage, quotes, manager-tier approvals |
+| Technician | tech@demo.com | Only assigned jobs (Today / Jobs views) |
+| Vendor | vendor@demo.com | Only Coastal HVAC's jobs + quote requests |
+| Viewer | viewer@demo.com | Read-only owner view (investors/accountants) |
+| 2nd org owner | owner@bayview.demo | A separate organization (proves isolation) |
 
-1. Push this folder to a GitHub repo.
-2. Railway → New Project → Deploy from GitHub repo. It auto-detects Node and runs `npm start`.
-3. Set environment variables:
-   - `SESSION_SECRET` — any long random string
-4. **Persistence (recommended):** attach a Railway Volume mounted at `/data`, then set:
-   - `DATA_DIR=/data`
-   - `UPLOAD_DIR=/data/uploads`
-
-   Without a volume, the SQLite database and uploaded photos reset on each redeploy (fine for a demo).
+## What's new in V2
+- **Multi-tenant organizations** — self-serve signup creates an org; every query is scoped server-side to the session's organization; cross-org access always returns 404. Work-order numbers and settings are unique per organization.
+- **Team management** — invite links (owner/manager/technician/viewer/vendor), role changes, deactivation (history preserved), last-owner protection.
+- **Richer intake + triage queue** — tenant-context fields (access, permission to enter, pets, availability), emergency + safety/water/electrical/HVAC flags, and triage actions: convert (carries access info to the WO), re-prioritize, need-info, duplicate, reject. Converted/closed requests can't be re-triaged.
+- **Configurable completion requirements** — per-category checklists (before/after photo, notes, materials, receipt, time). Enforced server-side; managers can override with a logged reason.
+- **Technician flow** — Start Travel → Arrived → Start Work (travel and work time tracked separately), big-button UI, completion checklist modal.
+- **Tiered approvals** — under T1: none; T1–T2: manager; over T2: owner only (managers get 403). Tiers editable in Settings.
+- **Vendor quotes** — request from multiple vendors, vendors see and submit only their own, approving one assigns the job and declines the rest.
+- **Attention Center dashboard** — grouped actionable cards: emergencies, approvals, overdue, triage, repeat repairs, PM overdue, cost anomalies, repair-vs-replace, quotes to review.
+- **Property snapshot + unified timeline** — operating stats up top; filterable history across repairs, preventive work, inspections, and asset installs; explainable health score secondary.
+- **Repair vs. replace engine** — transparent scoring (age, repair frequency, 12-mo spend vs. replacement cost, warranty) with owner actions: get quotes / mark replacement / keep repairing / dismiss 90 days.
+- **QR labels** — printable SVG codes per asset/property/unit; scanning opens the equipment page with full service history.
+- **CapEx forecast horizons** — 12 / 24 / 60 months with confidence levels; property comparison table (sortable); spend by vendor and technician; reactive-vs-preventive split.
+- **Notification preferences** — per-kind in-app toggles (schema is email/SMS-ready).
+- **Audit trail** — old → new values on status/priority/assignment changes; overrides logged.
 
 ## Architecture
+- **Backend:** Node + Express + better-sqlite3 (`src/db.js` schema+migration, `src/api.js` REST, `src/insights.js` analytics, `src/seed.js` + `src/seed2.js` demo data)
+- **Frontend:** dependency-free vanilla SPA (`public/js/app.js`), hash routing, role-aware
+- **Migration:** `migrateV2()` runs automatically and is idempotent. It adds V2 tables/columns and rebuilds tables where SQLite CHECK constraints or key shapes had to change (`users` role check → app-layer; `work_orders` per-org numbering; `requests` proper PK + intake fields; `settings` per-org keys). Existing data is preserved and backfilled to the first organization.
 
-- **Backend:** Express + better-sqlite3 (WAL mode), session auth (bcrypt), multer photo uploads
-- **Frontend:** zero-build vanilla JS SPA (`public/`), hash routing, mobile-first
-- `src/db.js` — schema (19 tables) · `src/seed.js` — demo data · `src/api.js` — REST API + role guards · `src/insights.js` — health score, repeat-repair detection, tech scorecards, CapEx forecast
+## Deploying to Railway
+1. Push this folder to GitHub; Railway auto-deploys on push.
+2. Set env vars: `SESSION_SECRET` (any long random string). Optional: `DATA_DIR=/data`, `UPLOAD_DIR=/data/uploads` with a mounted volume at `/data` so the database and photos survive redeploys.
+3. `PORT` is provided by Railway automatically.
 
-## What's implemented
-
-**Phase 1 (complete):** auth + 4 roles with enforced permissions, properties/units, maintenance requests → work-order conversion, assignment (tech or vendor), 8-status workflow with full audit trail, technician mobile "Today" view with one-tap Start/Complete + live timer, before/after/receipt photos (camera capture on mobile), notes + voice-note entry, materials (auto-create expense lines), expenses, approval threshold workflow with instant round-trip notifications, in-app notifications, owner dashboard (stats, Needs Attention, status breakdown, spend, problem properties), global search.
-
-**Phase 2 (complete):** explainable 0–100 Property Health Score with itemized deductions, technician scorecards (jobs, avg time, first-time fix, repeat rate, avg cost, on-time %), repeat-repair detection (3+ same property+category in 180 days), preventive-maintenance schedules that auto-generate work orders as due dates approach (checked at boot and every 6 hours), asset tracking with age/useful-life status, monthly + category cost analytics, maintenance calendar.
-
-**Phase 3 (started):** CapEx forecast (24-month window from asset age/useful life/replacement cost, clearly labeled as estimates). AI diagnosis, route optimization, and trend detection are intentionally left for later so they can't compromise the core workflow.
-
-## Notes
-
-- Approval threshold is configurable in Settings (default $150).
-- Sessions use the in-memory store — fine for a small team on one instance; swap in `connect-sqlite3` if you need sessions to survive restarts.
-- "Voice notes" are typed/dictated via the phone keyboard mic; true audio recording is a natural next step.
+## Tests
+`node test/api.test.js` — 57 assertions covering auth, org isolation, viewer/tech/vendor scoping, intake→triage→completion, tiered approvals, quotes, validation, team protections, insights, and QR generation.
