@@ -1,4 +1,4 @@
-/* OpsDeck SPA — V2 */
+/* Steadhold SPA — V2 */
 (function () {
 'use strict';
 
@@ -80,7 +80,7 @@ function shell(content, route) {
   $app.innerHTML = `
   <div class="shell">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
       <div style="padding:0 12px 14px;font-size:12px;color:#8FA0A8;font-weight:600">${esc(ME.org_name || '')}</div>
       ${nav.map(([h, i, l]) => `<a class="nav-item ${route.startsWith(h) ? 'active' : ''}" href="${h}"><span>${i}</span>${l}</a>`).join('')}
       <div class="nav-spacer"></div>
@@ -89,21 +89,43 @@ function shell(content, route) {
     </aside>
     <div class="main">
       <div class="topbar">
-        <div class="brand" style="display:${window.innerWidth >= 900 ? 'none' : 'flex'}"><span class="brand-mark">O</span> OpsDeck</div>
+        <div class="brand" style="display:${window.innerWidth >= 900 ? 'none' : 'flex'}"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
         <div class="grow"></div>
         ${canRead() ? `<button class="icon-btn" id="btn-search" aria-label="Search">🔍</button>` : ''}
         <a class="icon-btn" href="#/notifications" aria-label="Notifications">🔔${unreadCount ? '<span class="badge-dot"></span>' : ''}</a>
+        <button class="icon-btn acct-btn" id="btn-acct" aria-label="Account menu">👤</button>
       </div>
       <div class="page">${content}</div>
     </div>
   </div>
   <nav class="tabbar">${tabs.map(([h, i, l]) => `<a class="tab ${route.startsWith(h) ? 'active' : ''}" href="${h}"><span class="ti">${i}</span>${l}</a>`).join('')}</nav>`;
   const lo = document.getElementById('btn-logout');
-  if (lo) lo.onclick = async () => { await POST('/auth/logout', {}); ME = null; location.hash = '#/login'; };
+  if (lo) lo.onclick = doLogout;
   const sb = document.getElementById('btn-search');
   if (sb) sb.onclick = openSearch;
+  const ab = document.getElementById('btn-acct');
+  if (ab) ab.onclick = openAccountMenu;
 }
 function loadingShell(route) { shell('<div class="skel"></div><div class="skel"></div><div class="skel" style="height:180px"></div>', route); }
+
+async function doLogout() {
+  try { await POST('/auth/logout', {}); } catch (e) {}
+  ME = null; location.hash = '#/login'; location.reload();
+}
+function openAccountMenu() {
+  const links = canRead()
+    ? [['#/calendar', '📅', 'Calendar'], ['#/team', '👷', 'Team'], ['#/vendors', '🚚', 'Vendors'], ['#/notifications', '🔔', 'Notifications'], ['#/settings', '⚙', 'Settings']]
+    : [['#/notifications', '🔔', 'Notifications'], ['#/profile', '👤', 'Profile']];
+  modal(`
+    <div style="padding:2px 2px 10px">
+      <div style="font-weight:800;font-family:var(--font-d);font-size:17px">${esc(ME.name)}</div>
+      <div class="s" style="color:var(--muted)">${esc(ME.email)} · ${ME.role}${ME.role === 'viewer' ? ' (read-only)' : ''}</div>
+      <div class="s" style="color:var(--muted)">${esc(ME.org_name || '')}</div>
+    </div>
+    ${links.map(([h, i, l]) => `<a class="list-item" href="${h}" onclick="closeModal()"><div class="body"><div class="t">${i}&nbsp; ${l}</div></div><div class="end">›</div></a>`).join('')}
+    <button class="btn danger full" style="margin-top:14px" onclick="doLogout()">Sign out</button>`);
+}
+window.doLogout = doLogout;
 
 /* ---------------- login / signup / join ---------------- */
 function renderLogin(msg, mode) {
@@ -140,7 +162,7 @@ function renderLogin(msg, mode) {
   };
   $app.innerHTML = `
   <div class="login-wrap"><div class="login-card">
-    <div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+    <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
     <div class="login-sub">${mode === 'signup' ? 'Set up your organization — takes about a minute' : 'Maintenance operations for your rental portfolio'}</div>
     ${msg ? `<div class="err">${esc(msg)}</div>` : ''}
     ${forms[mode]}
@@ -172,7 +194,7 @@ function renderJoin(qs) {
   GET('/auth/invite/' + token).then(inv => {
     $app.innerHTML = `
     <div class="login-wrap"><div class="login-card">
-      <div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
       <div class="login-sub">You've been invited to join <b>${esc(inv.org_name)}</b> as a ${esc(inv.role)}.</div>
       <div class="field"><label>Your name</label><input id="j-name" value="${esc(inv.name || '')}"></div>
       <div class="field"><label>Email</label><input value="${esc(inv.email)}" disabled></div>
@@ -187,7 +209,7 @@ function renderJoin(qs) {
       } catch (e) { toast(e.message); }
     };
   }).catch(() => {
-    $app.innerHTML = `<div class="login-wrap"><div class="login-card"><div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+    $app.innerHTML = `<div class="login-wrap"><div class="login-card"><div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
       <div class="err">This invitation link is no longer valid. Ask your manager to send a new one.</div>
       <button class="btn pri full" onclick="location.hash='#/login';location.reload()">Go to sign in</button></div></div>`;
   });
@@ -195,7 +217,7 @@ function renderJoin(qs) {
 
 /* ---------------- public tenant report form ---------------- */
 async function renderReport(token) {
-  document.title = 'Report a maintenance issue';
+  document.title = 'Report a maintenance issue — Steadhold';
   let info;
   try {
     const r = await fetch('/api/intake/' + encodeURIComponent(token));
@@ -203,7 +225,7 @@ async function renderReport(token) {
     info = await r.json();
   } catch (e) {
     $app.innerHTML = `<div class="login-wrap"><div class="login-card">
-      <div class="brand"><span class="brand-mark">O</span> OpsDeck</div>
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
       <div class="err">This link isn't valid anymore. Please contact your property manager directly.</div></div></div>`;
     return;
   }
@@ -303,7 +325,7 @@ async function renderOnboarding() {
         <button class="btn pri full" id="ob-go">Create work order</button>`
     };
     $app.innerHTML = `<div class="login-wrap"><div class="login-card">
-      <div class="brand"><span class="brand-mark">O</span> ${esc(ME.org_name || 'OpsDeck')}</div>
+      <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> ${esc(ME.org_name || 'Steadhold')}</div>
       <div class="login-sub">Step ${step} of 5</div>
       <div class="steps">${steps}</div>
       ${bodies[step]}
@@ -984,6 +1006,7 @@ async function renderProfile() {
   shell(`
     <div class="card"><div class="card-title">${esc(ME.name)}</div>
       <div class="s">${esc(ME.email)} · ${ME.role}</div>
+      <button class="btn danger full" style="margin-top:12px" onclick="doLogout()">Sign out</button>
     </div>
     <div class="card"><div class="card-title">Notification preferences</div><div id="np-slot"><div class="skel"></div></div></div>
   `, '#/profile');
