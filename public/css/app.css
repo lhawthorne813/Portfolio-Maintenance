@@ -391,3 +391,109 @@ select.fpill{appearance:none;padding-right:30px;background-image:linear-gradient
 html,body{overflow-x:hidden}
 .page,.card{min-width:0;max-width:100%}
 .card{overflow-wrap:anywhere}
+
+/* ============================================================
+   VISUAL REFRESH — icon system, calmer surfaces, thumb-reach
+   Field apps are used one-handed in bad light: bigger targets,
+   fewer competing shadows, stronger type hierarchy.
+   ============================================================ */
+:root{
+  --shadow:0 1px 2px rgba(23,36,45,.05);
+  --shadow-lift:0 2px 4px rgba(23,36,45,.05),0 8px 20px rgba(23,36,45,.06);
+  --radius:16px;
+  --tap:48px;                     /* glove-friendly minimum target */
+}
+
+/* Icons inherit text color and align to the baseline of their row */
+.ico{flex-shrink:0;vertical-align:-.18em}
+
+/* Sidebar nav with icons */
+.nav-item{display:flex;align-items:center;gap:11px}
+.nav-item .ico{opacity:.85}
+.nav-item.active .ico{opacity:1}
+.nav-count{background:var(--amber);color:var(--ink);border-radius:99px;padding:1px 8px;font-size:11px;font-weight:700;margin-left:auto}
+.nav-user button{display:flex;align-items:center;justify-content:center;gap:7px}
+
+/* Tab bar: taller targets, clearer active state, true safe-area padding */
+.tabbar{padding-bottom:max(env(safe-area-inset-bottom),6px);box-shadow:0 -1px 0 var(--line)}
+.tab{min-height:var(--tap);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;font-size:10.5px;font-weight:600;letter-spacing:.1px;padding:6px 2px;transition:color .15s}
+.tab .ti{display:flex;line-height:0}
+.tab.active{color:var(--pine)}
+.tab.active .ti{position:relative}
+.tab.active .ti:after{content:'';position:absolute;inset:-7px -11px;background:var(--pine-soft);border-radius:11px;z-index:-1}
+
+/* Top bar buttons */
+.icon-btn{width:40px;height:40px;border-radius:12px}
+
+/* Attention center: icon chips instead of emoji */
+.attn-ico{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:var(--amber-soft);color:#8A5D00;flex-shrink:0}
+.attn-ico.em{background:var(--red-soft);color:var(--red)}
+.attn-head{gap:12px;min-height:var(--tap)}
+.attn-head .go{color:var(--muted);font-size:15px}
+
+/* Cards: one soft shadow, hairline edge, more breathing room */
+.card{box-shadow:var(--shadow);border:1px solid var(--line);padding:16px 16px}
+.section-title{font-family:var(--font-d);font-weight:700;font-size:13px;text-transform:uppercase;letter-spacing:.9px;color:var(--muted);margin:22px 0 9px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+
+/* Buttons: larger, flatter, confident */
+.btn{min-height:44px;border-radius:12px;font-weight:700;font-size:14.5px;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:transform .08s,filter .15s}
+.btn:active{transform:scale(.985)}
+.btn.pri{background:var(--pine);color:#fff;box-shadow:none}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.sec{background:var(--card);border:1.5px solid var(--line);color:var(--ink)}
+.btn.big{min-height:58px;font-size:16.5px;letter-spacing:.2px}
+.btn.danger{background:var(--red-soft);color:var(--red);border:1.5px solid transparent}
+
+/* Menu rows in the account sheet */
+.menu-row{display:flex;align-items:center;gap:13px;min-height:var(--tap)}
+.menu-row .mi{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;background:var(--paper);color:var(--ink-2)}
+.menu-row .end{color:var(--muted)}
+
+/* Lists: comfortable rows, quiet dividers */
+.list-item{min-height:var(--tap);padding:11px 0;gap:12px}
+.list-item .t{font-weight:600;font-size:14.5px}
+.list-item .s{font-size:12.5px;color:var(--muted);margin-top:1px}
+
+/* Status chips: quieter, uppercase micro-label */
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;padding:4px 9px;border-radius:7px}
+.pri{font-size:10.5px;font-weight:800;letter-spacing:.6px;text-transform:uppercase}
+
+/* Live timer reads as a state, not a decoration */
+.timer-live{display:flex;align-items:center;gap:8px;background:var(--pine-soft);color:var(--pine);font-weight:700;font-size:13.5px;padding:10px 13px;border-radius:11px;margin-bottom:10px}
+
+/* Stats: numbers lead, labels recede */
+.stat{padding:14px 13px}
+.stat .v{font-family:var(--font-d);font-weight:800;font-size:25px;letter-spacing:-.6px;line-height:1.1}
+.stat .l{font-size:11px;color:var(--muted);font-weight:600;margin-top:3px;line-height:1.3}
+
+/* Job cards: the tech's primary object — give them presence */
+.job-card{box-shadow:var(--shadow);border:1px solid var(--line);border-left-width:5px;padding:15px 16px}
+.job-card.next{box-shadow:var(--shadow-lift)}
+.next-label{font-size:10px;font-weight:800;letter-spacing:1.1px;color:var(--pine)}
+
+/* Respect reduced-motion preferences */
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* Visible keyboard focus for accessibility */
+:focus-visible{outline:2.5px solid var(--pine);outline-offset:2px;border-radius:6px}
+
+/* Attention severity: red demands action now, amber needs a decision, slate is a trend to watch */
+.attn-head.lvl-critical{border-left-color:var(--red)}
+.attn-head.lvl-critical .attn-ico{background:var(--red-soft);color:var(--red)}
+.attn-head.lvl-action{border-left-color:var(--amber)}
+.attn-head.lvl-action .attn-ico{background:var(--amber-soft);color:#8A5D00}
+.attn-head.lvl-watch{border-left-color:#B7C2C7}
+.attn-head.lvl-watch .attn-ico{background:var(--paper);color:var(--ink-2)}
+.attn-head .cnt{font-family:var(--font-d);font-weight:800;font-size:22px;letter-spacing:-.5px}
+
+/* Tap-to-navigate: hands the address to the tech's own maps app */
+.nav-link{display:inline-flex;align-items:center;gap:5px;margin-top:9px;color:var(--pine);font-weight:600;font-size:13px;background:var(--pine-soft);padding:7px 11px;border-radius:9px;cursor:pointer}
+.job-card .nav-link{margin-top:10px}
+
+/* Connection state: a persistent, unmissable strip — never a toast that disappears
+   before a tech in a crawlspace has read it */
+.conn-bar{position:fixed;left:0;right:0;bottom:calc(var(--tap) + max(env(safe-area-inset-bottom),6px));z-index:60;
+  padding:10px 16px;font-size:13px;text-align:center;font-weight:600;letter-spacing:.1px}
+.conn-bar.off{background:var(--ink);color:#fff}
+.conn-bar.sync{background:var(--amber);color:var(--ink);cursor:pointer}
+@media(min-width:900px){.conn-bar{bottom:0}}
+.banner.off{background:var(--ink);color:#fff;display:flex;align-items:center;gap:8px}
