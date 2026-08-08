@@ -1,60 +1,125 @@
-# Steadhold — Property Maintenance Operations Platform
+# Steadhold V3 — Maintenance Autopilot
 
-Multi-tenant maintenance operations for small rental portfolios: intake → triage → work orders → completion enforcement → analytics, with roles for owners, managers, technicians, vendors, and read-only viewers.
+Steadhold is a maintenance operating system for owner-operated rental portfolios with roughly 20–200 units and 1–10 in-house technicians. It moves a repair from resident request to verified, cost-controlled completion automatically, while managers work from an exception queue instead of a general inbox.
 
-## Quick start (local)
+## What makes it different
+
+The core metric is **verified zero-touch resolution rate**: the share of resident-originated repairs that reached evidence-backed completion without management intervention. Every automated decision is explainable, logged, and reversible where the underlying action is safe to undo.
+
+- **Policy engine and Exception Center** — deterministic playbooks authorize routine actions; uncertainty, safety risks, policy breaches, overdue work, stale quotes, unaccepted assignments, parts delays, and resident replies become exceptions.
+- **Resident magic-link workflow** — no account required. Residents receive safety guidance, see status, reply, confirm appointments, grant entry permission, rate completion, and reopen failed repairs. Reopening creates a linked priority callback.
+- **Smart dispatch** — ranks technicians using trade skills, schedule and daily capacity, property familiarity, similar-job history, availability, emergency duty, and cost. Auto-assignment occurs only above a confidence threshold.
+- **Four ready-to-run playbooks** — active water leak, HVAC outage, electrical/safety hazard, and routine repair.
+- **SLA escalation** — configurable acknowledge, start, and resolve targets by priority, with durable recurring scans.
+- **Closed-loop cost capture** — receipt photos can create coded expenses and material lines; spend policies and low-confidence extraction create review exceptions. Repair-vs-replace guidance and repeat callbacks remain visible to owners.
+- **PMS/accounting bridges** — property/unit CSV import, work-order and accounting CSV export, token-scoped inbound maintenance webhooks, and HMAC-signed outbound event webhooks.
+- **Owner visibility** — weekly digest of completed/opened work, spend, automated actions, callbacks, exceptions, and zero-touch performance.
+- **Offline field operations** — cached app shell and reads, durable ordered write queue, photo support, and idempotent replay for technicians in low-signal locations.
+
+AI is optional and deliberately constrained. When `OPENAI_API_KEY` is configured, image and receipt interpretation uses structured output through the OpenAI Responses API. Deterministic playbooks and spending rules remain authoritative; model output never approves spend, dispatches a safety-sensitive job, or overrides a human.
+
+## Quick start
+
+Requires Node.js 18 or newer. Node.js 22 LTS is recommended.
+
 ```bash
 npm install
-node server.js          # http://localhost:3000
-node test/api.test.js   # run the 57-check test suite (server must be running)
+npm start
 ```
 
-## Demo logins (password: `demo123`)
-| Role | Email | Sees |
+Open `http://localhost:3000`. On an empty database Steadhold adds a demo portfolio automatically.
+
+For local optional adapters on Node.js 22, copy `.env.example` to `.env`, add the values you need, and run `node --env-file=.env server.js`. Hosted environments should set the same variables in their runtime configuration.
+
+| Role | Email | Password |
 |---|---|---|
-| Owner | owner@demo.com | Everything, incl. owner-tier approvals & org settings |
-| Manager | manager@demo.com | Day-to-day ops, triage, quotes, manager-tier approvals |
-| Technician | tech@demo.com | Only assigned jobs (Today / Jobs views) |
-| Vendor | vendor@demo.com | Only Coastal HVAC's jobs + quote requests |
-| Viewer | viewer@demo.com | Read-only owner view (investors/accountants) |
-| 2nd org owner | owner@bayview.demo | A separate organization (proves isolation) |
+| Owner | `owner@demo.com` | `demo123` |
+| Manager | `manager@demo.com` | `demo123` |
+| Technician | `tech@demo.com` | `demo123` |
+| Vendor | `vendor@demo.com` | `demo123` |
+| Viewer | `viewer@demo.com` | `demo123` |
+| Separate-org owner | `owner@bayview.demo` | `demo123` |
 
-## What's new in V2
-- **Multi-tenant organizations** — self-serve signup creates an org; every query is scoped server-side to the session's organization; cross-org access always returns 404. Work-order numbers and settings are unique per organization.
-- **Team management** — invite links (owner/manager/technician/viewer/vendor), role changes, deactivation (history preserved), last-owner protection.
-- **Richer intake + triage queue** — tenant-context fields (access, permission to enter, pets, availability), emergency + safety/water/electrical/HVAC flags, and triage actions: convert (carries access info to the WO), re-prioritize, need-info, duplicate, reject. Converted/closed requests can't be re-triaged.
-- **Configurable completion requirements** — per-category checklists (before/after photo, notes, materials, receipt, time). Enforced server-side; managers can override with a logged reason.
-- **Technician flow** — Start Travel → Arrived → Start Work (travel and work time tracked separately), big-button UI, completion checklist modal. Where a category requires a *before* photo, work cannot start until it is taken (enforced server-side; managers can override with a logged reason) — a before photo taken after the repair is worthless.
-- **Works without a manager** — plenty of operators run owner-direct with no manager in between. Steadhold detects when an org has no active manager and adapts: approvals go straight to the owner (no phantom middle tier), Settings shows one threshold instead of two, and technicians get a Call/Text button for the owner on every job. Add a manager later and the middle tier reappears on its own.
-- **Tiered approvals** — under T1: none; T1–T2: manager; over T2: owner only (managers get 403). Tiers editable in Settings.
-- **Vendor quotes** — request from multiple vendors, vendors see and submit only their own, approving one assigns the job and declines the rest.
-- **Attention Center dashboard** — grouped actionable cards: emergencies, approvals, overdue, triage, repeat repairs, PM overdue, cost anomalies, repair-vs-replace, quotes to review.
-- **Property snapshot + unified timeline** — operating stats up top; filterable history across repairs, preventive work, inspections, and asset installs; explainable health score secondary.
-- **Repair vs. replace engine** — transparent scoring (age, repair frequency, 12-mo spend vs. replacement cost, warranty) with owner actions: get quotes / mark replacement / keep repairing / dismiss 90 days.
-- **QR labels** — printable SVG codes per asset/property/unit; scanning opens the equipment page with full service history.
-- **CapEx forecast horizons** — 12 / 24 / 60 months with confidence levels; property comparison table (sortable); spend by vendor and technician; reactive-vs-preventive split.
-- **Phone notifications** — real push notifications to phones via Web Push: each user taps "Enable on this device" in notification preferences (Settings → Notifications, or Profile for techs). Works in the browser on Android; on iPhone the app must first be added to the Home Screen (the app walks users through it). Emergencies are marked urgent and stay on screen. Optional Pushover delivery per user: set the PUSHOVER_TOKEN env var on the server, then each user pastes their own Pushover key. Per-kind In-app and Phone toggles control both channels. VAPID keys are auto-generated and persisted alongside the database.
-- **Audit trail** — old → new values on status/priority/assignment changes; overrides logged.
-- **Public tenant intake** — every property has a shareable link and printable QR poster (Property page → "Tenant request link"). Tenants report issues with photos, access notes, pets, and availability — no account, no app. Submissions land in the triage queue, notify management instantly, and photos + access details carry onto the converted work order. Rate-limited; links are unguessable and can be reset per property at any time.
-- **Owner-review routing (per property)** — owners choose whether tenant requests go straight to maintenance triage or are held for the owner to review and release first (emergencies always go straight through). Viewers — the read-only owner/investor role — can also submit maintenance requests themselves, recorded as owner-reported.
+## Autopilot flow
 
-## Offline support
-Technicians work in basements and crawlspaces, so the app keeps working with no signal:
-- **App shell cached** by a service worker — Steadhold opens instantly with zero bars, even on a cold launch, and the signed-in session persists.
-- **Read cache** — every screen loaded while online is stored in IndexedDB and served back offline. After sign-in the app quietly pre-loads the day: open jobs, each job'''s full detail, properties, requests, and notifications.
-- **Write queue** — travel/arrival, timers, notes, photos, materials, expenses, approvals, and completions made offline are stored durably (photos as blobs) and replayed in order on reconnect. Order matters: a queued photo lands before the completion that requires it.
-- **Idempotent replay** — every queued mutation carries an op id (`X-Client-Op-Id`). The server records applied ops in a `client_ops` table and replays the original result for duplicates, so a flaky reconnect can never create two work orders or double-charge an expense.
-- **Honest UI** — a persistent strip shows "Working offline · N changes waiting to sync", confirmations say when something was saved locally rather than sent, and a screen never visited online explains itself instead of spinning forever.
+1. A resident, owner, or PMS creates a request.
+2. A durable job classifies it against the enabled playbooks and SLA policy.
+3. Steadhold sends safe resident guidance, creates and schedules the work order, and scores dispatch candidates.
+4. A high-confidence match is assigned automatically; otherwise one clear dispatch exception is created.
+5. Status, appointment, approval, parts, and completion events update the resident thread automatically.
+6. Evidence and cost rules gate closeout. The resident verifies the outcome or creates a linked callback.
+7. Owners see the result in the zero-touch KPI and weekly digest.
 
-## Architecture
-- **Backend:** Node + Express + better-sqlite3 (`src/db.js` schema+migration, `src/api.js` REST, `src/insights.js` analytics, `src/seed.js` + `src/seed2.js` demo data)
-- **Frontend:** dependency-free vanilla SPA (`public/js/app.js`), hash routing, role-aware
-- **Migration:** `migrateV2()` runs automatically and is idempotent. It adds V2 tables/columns and rebuilds tables where SQLite CHECK constraints or key shapes had to change (`users` role check → app-layer; `work_orders` per-org numbering; `requests` proper PK + intake fields; `settings` per-org keys). Existing data is preserved and backfilled to the first organization.
+The background worker only claims records from SQLite's `durable_jobs` and `outbox` tables. Jobs, retries, scheduled scans, outbound delivery, and login sessions survive process restarts.
 
-## Deploying to Railway
-1. Push this folder to GitHub; Railway auto-deploys on push.
-2. Set env vars: `SESSION_SECRET` (any long random string). Optional: `DATA_DIR=/data`, `UPLOAD_DIR=/data/uploads` with a mounted volume at `/data` so the database and photos survive redeploys.
-3. `PORT` is provided by Railway automatically.
+## Configuration
+
+Copy values from [.env.example](.env.example) into your hosting environment. Only `SESSION_SECRET` is strongly recommended for production; all delivery and AI adapters are optional.
+
+| Variable | Purpose |
+|---|---|
+| `SESSION_SECRET` | Stable encrypted-cookie signing secret |
+| `DATA_DIR` | Persistent directory for SQLite and generated keys |
+| `UPLOAD_DIR` | Persistent directory for resident and work-order photos |
+| `APP_URL` | Public origin used in email/SMS tracking links |
+| `OPENAI_API_KEY` | Optional receipt and maintenance-photo interpretation |
+| `OPENAI_VISION_MODEL` | Optional model override; defaults to `gpt-5.4-mini` |
+| `RESEND_API_KEY`, `EMAIL_FROM` | Optional email delivery |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | Optional SMS delivery |
+| `PUSHOVER_TOKEN` | Optional Pushover delivery; Web Push works independently |
+
+Adapter readiness is shown in **Settings → Autopilot** and **Settings → Integrations**. If an adapter is absent, its work is marked skipped/not configured without blocking the maintenance workflow.
+
+### Inbound PMS webhook
+
+Create an inbound endpoint in **Settings → Integrations**, then send JSON to its private URL:
+
+```json
+{
+  "event": "maintenance_request",
+  "property_id": 1,
+  "unit_id": 2,
+  "category": "HVAC",
+  "priority": "high",
+  "description": "No heat",
+  "reported_by": "PMS sync",
+  "reporter_phone": "+19045550199"
+}
+```
+
+Outbound webhooks include `X-Steadhold-Event` and, when a secret is present, `X-Steadhold-Signature: sha256=<HMAC>`. Private-network webhook destinations are rejected.
 
 ## Tests
-`node test/api.test.js` — 57 assertions covering auth, org isolation, viewer/tech/vendor scoping, intake→triage→completion, tiered approvals, quotes, validation, team protections, insights, and QR generation.
+
+Start the server against a disposable database, then run both suites:
+
+```bash
+npm run test:regression
+npm run test:autopilot
+```
+
+- `test/api.test.js`: 109 regression assertions covering authentication, tenant isolation, roles, intake, technician flow, completion gates, approvals, vendors, offline replay, push, analytics, and QR.
+- `test/v3.test.js`: 50 end-to-end Autopilot assertions covering policy pause/reactivation, two-way resident workflow and evidence, classification, technician/vendor dispatch, callbacks, exceptions, audit/undo, SLA, digests, receipt fallback, CSV, and webhooks.
+
+The test server should use a fresh `DATA_DIR` and `UPLOAD_DIR`; both suites intentionally create records.
+
+## Architecture
+
+- **Backend:** Node.js, Express, SQLite through `better-sqlite3`
+- **Automation:** `src/automation.js` policy engine and durable jobs; `src/notifications.js` outbox and delivery adapters
+- **Optional AI:** `src/ai.js`, OpenAI Responses API with strict JSON schemas and `store: false`
+- **Frontend:** dependency-free hash-routed SPA with role-aware views and a public resident portal
+- **Persistence:** idempotent V2/V3 migrations, SQLite sessions, tenant-scoped records, durable jobs/outbox
+- **Offline:** service-worker app shell plus IndexedDB reads and idempotent mutation replay
+
+## Deployment
+
+For Railway or another Node host:
+
+1. Run `npm start` and expose the platform-provided `PORT`.
+2. Mount a persistent volume and set `DATA_DIR=/data` and `UPLOAD_DIR=/data/uploads`.
+3. Set a long random `SESSION_SECRET` and the public `APP_URL`.
+4. Add only the optional delivery/AI credentials you intend to use.
+5. Back up the SQLite database and uploads together.
+
+Steadhold applies schema migrations automatically and preserves existing V1/V2 data. A fresh-install bootstrap defect in the earlier build has also been corrected, so a clean database and a restart of an existing database follow the same safe initialization path.

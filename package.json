@@ -1,11 +1,13 @@
 {
   "name": "steadhold",
-  "version": "1.0.0",
-  "description": "Steadhold — Property Maintenance Operations Platform",
+  "version": "3.0.0",
+  "description": "Steadhold — Maintenance Autopilot for owner-operated rental portfolios",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "seed": "node src/seed.js --force"
+    "seed": "node src/seed.js --force",
+    "test:regression": "node test/api.test.js",
+    "test:autopilot": "node test/v3.test.js"
   },
   "engines": {
     "node": ">=18"
