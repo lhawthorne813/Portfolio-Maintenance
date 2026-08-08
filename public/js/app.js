@@ -1,4 +1,4 @@
-/* Steadhold SPA — V2 */
+/* Steadhold SPA — V3 Autopilot */
 (function () {
 'use strict';
 
@@ -25,6 +25,7 @@ function fmtDateFull(d) { if (!d) return '—'; const dt = new Date((d + '').rep
 function fmtDateTime(d) { if (!d) return '—'; const dt = new Date((d + '').replace(' ', 'T')); return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
 function fmtTime(d) { const dt = new Date((d + '').replace(' ', 'T')); return dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
 function fmtMin(m) { if (m == null) return '—'; const h = Math.floor(m / 60); return h ? `${h}h ${m % 60}m` : `${m}m`; }
+function json(value, fallback = null) { try { return JSON.parse(value); } catch (e) { return fallback; } }
 // Property mark: unit count over a building glyph. Reads at a glance and tells you
 // something true about the property, unlike initials or a random gradient.
 function propMark(p, size) {
@@ -390,9 +391,98 @@ async function renderReport(token) {
         <div style="font-size:48px;margin-bottom:8px">${data.emergency ? '🚨' : '✅'}</div>
         <h3 style="margin-bottom:6px">Request received</h3>
         <div class="s" style="margin-bottom:12px">Reference <b>${esc(data.reference)}</b>. ${data.emergency ? 'Marked as an emergency — the maintenance team has been alerted.' : 'The maintenance team has been notified and will follow up.'}</div>
-        <div class="s" style="color:var(--muted)">You can close this page. Save the link to report future issues.</div>
+        <a class="btn pri full" style="margin:10px 0" href="${esc(data.tracking_url)}">Track this repair</a>
+        <div class="s" style="color:var(--muted)">Save the tracking page to reply, confirm the appointment, and let the team know whether the repair held.</div>
       </div></div>`;
     } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = 'Submit request'; }
+  };
+}
+
+/* ---------------- resident magic-link thread ---------------- */
+async function renderTrack(token) {
+  document.title = 'Maintenance status — Steadhold';
+  let data;
+  try {
+    const response = await fetch('/api/track/' + encodeURIComponent(token));
+    if (!response.ok) throw new Error();
+    data = await response.json();
+  } catch (error) {
+    $app.innerHTML = `<div class="login-wrap"><div class="login-card"><div class="brand">Steadhold</div>
+      <div class="err">This tracking link is not valid. Contact your property manager for an updated link.</div></div></div>`;
+    return;
+  }
+  const r = data.request, w = data.work_order;
+  const state = w ? w.status : r.status;
+  const steps = [
+    ['received', true], ['work order', !!w], ['assigned', !!(w && w.assigned_to)],
+    ['scheduled', !!(w && w.scheduled_date)], ['in progress', !!(w && ['in_progress','waiting_parts','waiting_approval','completed'].includes(w.status))],
+    ['complete', !!(w && w.status === 'completed')]
+  ];
+  $app.innerHTML = `<div class="resident-wrap"><div class="resident-page">
+    <div class="resident-brand"><svg class="brand-mark" viewBox="0 0 112 112"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <div><b>${esc(data.property.organization)}</b><span>Maintenance updates</span></div></div>
+    <div class="card resident-hero">
+      <div class="s mono">${esc(r.reference)}${w ? ' · ' + esc(w.number) : ''}</div>
+      <h1>${esc(w ? w.title : r.category + ' request')}</h1>
+      <div class="s">${esc(data.property.name)}${data.property.unit ? ' · Unit ' + esc(data.property.unit) : ''}</div>
+      <div class="resident-status">${chip(state)}${w && w.assigned_to ? `<span>${esc(w.assigned_to)}</span>` : '<span>Matching the right technician</span>'}</div>
+      <div class="resident-steps">${steps.map(([label, done]) => `<div class="${done ? 'done' : ''}"><i>${done ? '✓' : ''}</i><span>${label}</span></div>`).join('')}</div>
+    </div>
+    ${w && w.scheduled_date ? `<div class="card appointment-card"><div><div class="s">Appointment</div><b>${fmtDateFull(w.scheduled_date)}</b><div class="s">${w.assigned_to ? esc(w.assigned_to) : 'Technician assignment pending'}</div></div>
+      ${!w.appointment_confirmed ? `<button class="btn pri" id="track-confirm">Confirm</button>` : '<span class="verified">✓ Confirmed</span>'}</div>` : ''}
+    <div class="card"><div class="card-title">Updates</div>
+      <div class="resident-thread">${data.messages.length ? data.messages.map(m => `<div class="resident-msg ${m.direction}">${m.attachment_url ? `<img src="${esc(m.attachment_url)}" alt="Resident maintenance update">` : ''}<div>${esc(m.body)}</div><span>${fmtDateTime(m.created_at)}</span></div>`).join('') : '<div class="s">Your request is received. Updates will appear here.</div>'}</div>
+      ${!['rejected','duplicate'].includes(r.status) ? `<div class="field" style="margin-top:12px"><textarea id="track-message" placeholder="Reply with an update, photo description, or access note…"></textarea></div>
+      <label class="resident-photo"><input id="track-photo" type="file" accept="image/jpeg,image/png,image/webp,image/heic,image/heif"> <span>Attach a follow-up photo</span></label>
+      <button class="btn sec full" id="track-send">Send reply</button>` : ''}
+    </div>
+    ${w && w.status !== 'completed' ? `<div class="card resident-access"><div><b>Entry permission</b><div class="s">You can change this any time before the visit. Put gate codes, pets, or timing details in a reply above.</div></div>
+      <label class="permission-switch"><input id="track-entry" type="checkbox" ${r.permission_to_enter ? 'checked' : ''}><span>Maintenance may enter if I am away</span></label></div>` : ''}
+    ${w && w.status === 'completed' ? `<div class="card"><div class="card-title">Did this repair solve the issue?</div>
+      ${r.satisfaction_score ? `<div class="verified">✓ Rating received: ${r.satisfaction_score}/5</div>` : `<div class="rating-row">${[1,2,3,4,5].map(n => `<button data-score="${n}" aria-label="Rate ${n} out of 5">${n}<span>★</span></button>`).join('')}</div>`}
+      <div class="s" style="margin:12px 0 8px">If the issue is still happening, reopen it. A priority callback will be linked to the original repair so the team can see what failed.</div>
+      <div class="field"><textarea id="track-reopen-note" placeholder="What is still happening? (optional)"></textarea></div>
+      <button class="btn danger full" id="track-reopen">Reopen repair</button></div>` : ''}
+    <div class="resident-foot">Powered by Steadhold · Keep this private tracking link for your records.</div>
+  </div></div>`;
+
+  const act = async body => {
+    const response = await fetch('/api/track/' + encodeURIComponent(token) + '/actions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Could not save that update');
+    return result;
+  };
+  const confirm = document.getElementById('track-confirm');
+  if (confirm) confirm.onclick = async () => { try { await act({ action: 'confirm_appointment' }); toast('Appointment confirmed'); renderTrack(token); } catch (e) { toast(e.message); } };
+  const send = document.getElementById('track-send');
+  if (send) send.onclick = async () => {
+    const body = fv('track-message');
+    const photo = document.getElementById('track-photo');
+    if (!body && !(photo && photo.files[0])) return toast('Write a message or attach a photo first');
+    try {
+      const form = new FormData();
+      form.append('body', body);
+      if (photo && photo.files[0]) form.append('photo', photo.files[0]);
+      const response = await fetch('/api/track/' + encodeURIComponent(token) + '/messages', {
+        method: 'POST', body: form
+      });
+      const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Could not send');
+      toast('Reply sent'); renderTrack(token);
+    } catch (e) { toast(e.message); }
+  };
+  const entry = document.getElementById('track-entry');
+  if (entry) entry.onchange = async () => {
+    try { await act({ action: 'permission_to_enter', value: entry.checked }); toast('Entry permission updated'); }
+    catch (e) { entry.checked = !entry.checked; toast(e.message); }
+  };
+  document.querySelectorAll('.rating-row button').forEach(button => button.onclick = async () => {
+    try { await act({ action: 'satisfied', score: +button.dataset.score }); toast('Thanks — your rating was saved'); renderTrack(token); } catch (e) { toast(e.message); }
+  });
+  const reopen = document.getElementById('track-reopen');
+  if (reopen) reopen.onclick = async () => {
+    try { const result = await act({ action: 'reopen', note: fv('track-reopen-note') }); toast(`${result.number} created`); renderTrack(token); } catch (e) { toast(e.message); }
   };
 }
 
@@ -486,21 +576,36 @@ async function renderDashboard() {
   const totalWOs = Object.entries(d.status_counts).filter(([k]) => k !== 'completed').reduce((a, [, v]) => a + v, 0) || 1;
   const barOrder = ['new', 'assigned', 'scheduled', 'in_progress', 'waiting_parts', 'waiting_approval', 'waiting_vendor'];
   const spendDelta = s.spend_prev_month ? Math.round(((s.spend_month - s.spend_prev_month) / s.spend_prev_month) * 100) : null;
+  const exceptions = d.exceptions || [];
+  const activity = d.automated_today || [];
 
   shell(`
-    <div class="section-title" style="margin-top:0">What needs my attention?</div>
-    ${d.attention.length ? d.attention.map((g, i) => `
-      <div class="attn-group">
-        <div class="attn-head lvl-${g.level || 'watch'}" onclick="${g.items.length ? `document.getElementById('ag${i}').style.display=document.getElementById('ag${i}').style.display==='none'?'block':'none'` : `location.hash='${g.link || '#/dashboard'}'`}">
-          <span class="attn-ico">${ico(ATTN_ICO[g.type] || 'alert', 19)}</span>
-          <span class="cnt">${g.count}</span>
-          <span class="t">${esc(g.title)}</span>
-          <span class="go">${g.items.length ? '▾' : '›'}</span>
-        </div>
-        ${g.items.length ? `<div class="attn-items" id="ag${i}" style="display:${g.type === 'emergency' || g.type === 'approval' ? 'block' : 'none'}">
-          ${g.items.map(it => `<a href="${it.link}"><div>${esc(it.t)}</div><div class="s">${esc(it.s)}</div></a>`).join('')}
-        </div>` : ''}
-      </div>`).join('') : `<div class="card empty">Nothing needs your attention right now. Everything is on track.</div>`}
+    <div class="autopilot-hero">
+      <div><span class="auto-live"><i></i> AUTOPILOT ACTIVE</span><h1>Manage the exceptions, not the queue.</h1>
+      <p>Steadhold classifies, creates, dispatches, follows up, and documents routine work. Risk and uncertainty come here.</p></div>
+      <a class="btn sec" href="#/settings?tab=autopilot">Policies</a>
+    </div>
+    <div class="auto-kpis">
+      <div><b>${d.automation ? d.automation.automated_today : activity.length}</b><span>automated today</span></div>
+      <div><b>${s.verified_zero_touch_rate || 0}%</b><span>verified zero-touch resolution</span></div>
+      <div class="${exceptions.length ? 'has-exceptions' : ''}"><b>${exceptions.length}</b><span>open exceptions</span></div>
+    </div>
+
+    <div class="section-title">Exception Center <button class="more" onclick="runAutomation('sla_scan')">Refresh checks ›</button></div>
+    ${exceptions.length ? `<div class="exception-list">${exceptions.map(x => `
+      <div class="exception-card sev-${x.severity}">
+        <a href="${x.link || '#/dashboard'}"><div class="exception-top"><span>${x.severity === 'critical' ? 'Act now' : x.severity === 'action' ? 'Decision needed' : 'Review'}</span><small>${fmtDateTime(x.created_at)}</small></div>
+          <b>${esc(x.title)}</b><p>${esc(x.detail || '')}</p></a>
+        ${canWrite() ? `<div class="exception-actions"><button onclick="exceptionAction(${x.id},'resolve')">Resolve</button><button onclick="exceptionAction(${x.id},'snooze')">Snooze 24h</button></div>` : ''}
+      </div>`).join('')}</div>` : `<div class="card auto-clear"><span>✓</span><div><b>No exceptions</b><p>Every active workflow is inside policy and SLA.</p></div></div>`}
+
+    <div class="section-title">Automated today <a class="more" href="#/settings?tab=autopilot">Full activity ›</a></div>
+    <div class="card automation-feed">
+      ${activity.length ? activity.slice(0, 8).map(a => `<div class="automation-row">
+        <span class="automation-check">✓</span><div class="body"><b>${esc(a.action.replace(/_/g, ' '))}</b><p>${esc(a.reason || '')}</p><small>${fmtDateTime(a.created_at)}${a.confidence != null ? ` · ${Math.round(a.confidence * 100)}% confidence` : ''}</small></div>
+        ${a.link ? `<a href="${a.link}">View</a>` : ''}${a.can_undo && canWrite() ? `<button onclick="undoAutomation(${a.id})">Undo</button>` : ''}
+      </div>`).join('') : '<div class="empty">No automated actions yet today. New requests and recurring checks will appear here.</div>'}
+    </div>
 
     <div class="section-title">Operations at a glance</div>
     <div class="stat-row">
@@ -509,7 +614,7 @@ async function renderDashboard() {
       <div class="stat ${s.overdue ? 'bad' : ''}"><div class="v">${s.overdue}</div><div class="l">Overdue</div></div>
       <div class="stat"><div class="v">${s.completed_month}</div><div class="l">Completed this month</div></div>
       <div class="stat"><div class="v">${money(s.spend_month)}</div><div class="l">Spend this month${spendDelta != null ? ` (${spendDelta > 0 ? '+' : ''}${spendDelta}%)` : ''}</div></div>
-      <div class="stat"><div class="v">${s.avg_completion_days ?? '—'}<span style="font-size:14px">d</span></div><div class="l">Avg completion time</div></div>
+      <div class="stat"><div class="v">${s.verified_zero_touch_rate || 0}<span style="font-size:14px">%</span></div><div class="l">Verified zero-touch · 30d</div></div>
     </div>
 
     <div class="section-title">Work order status</div>
@@ -538,6 +643,18 @@ async function renderDashboard() {
     </div>
   `, '#/dashboard');
 }
+window.exceptionAction = async (id, action) => {
+  try { await PATCH('/exceptions/' + id, { action, hours: 24 }); toast(action === 'resolve' ? 'Exception resolved' : 'Snoozed for 24 hours'); render(); }
+  catch (e) { toast(e.message); }
+};
+window.undoAutomation = async id => {
+  try { await POST(`/automation/activity/${id}/undo`, {}); toast('Automated change reversed and logged'); render(); }
+  catch (e) { toast(e.message); }
+};
+window.runAutomation = async action => {
+  try { await POST('/automation/run', { action }); toast(action === 'sla_scan' ? 'SLA and policy checks refreshed' : 'Automation run complete'); render(); }
+  catch (e) { toast(e.message); }
+};
 
 /* ---------------- maintenance: triage + PM ---------------- */
 const REPORTER_TYPES = ['tenant', 'owner', 'manager', 'technician', 'inspection', 'preventive'];
@@ -554,6 +671,7 @@ async function renderMaintenance() {
   const reqCard = r => `
     <div class="attn-group"><div style="padding:13px 14px;border-left:4px solid ${r.priority === 'emergency' ? 'var(--red)' : r.priority === 'high' ? 'var(--amber)' : 'var(--line)'}">
       <div class="s">${pri(r.priority)} · ${esc(r.category)} · ${fmtDate(r.created_at)} · via ${esc(r.reporter_type || 'manager')}</div>
+      ${r.playbook ? `<div class="auto-badge">Autopilot · ${esc(r.playbook.replace(/_/g, ' '))}${r.triage_confidence != null ? ` · ${Math.round(r.triage_confidence * 100)}%` : ''}</div>` : r.automation_state === 'queued' ? '<div class="auto-badge working">Autopilot queued</div>' : ''}
       <div style="font-weight:700;margin:2px 0">${esc(r.property_name)}${r.unit_label ? ' · Unit ' + esc(r.unit_label) : ''}</div>
       <div style="font-size:14px">${esc(r.description)}</div>
       ${flags(r).length ? `<div class="s" style="margin-top:4px;font-weight:700;color:#9A6B00">${flags(r).join(' · ')}</div>` : ''}
@@ -575,7 +693,7 @@ async function renderMaintenance() {
 
   shell(`
     ${ownerRev.length ? `<div class="section-title" style="margin-top:0">👤 Waiting for owner review</div>${ownerRev.map(reqCard).join('')}` : ''}
-    <div class="section-title" ${ownerRev.length ? '' : 'style="margin-top:0"'}>Needs triage ${canWrite() || ME.role === 'viewer' ? `<button class="btn pri" style="padding:8px 14px" id="r-new">+ Request</button>` : ''}</div>
+    <div class="section-title" ${ownerRev.length ? '' : 'style="margin-top:0"'}>Request inbox ${canWrite() || ME.role === 'viewer' ? `<button class="btn pri" style="padding:8px 14px" id="r-new">+ Request</button>` : ''}</div>
     ${open.length ? open.map(reqCard).join('') : `<div class="card empty">No requests waiting for triage.<br><br>${canWrite() || ME.role === 'viewer' ? '<button class="btn pri" id="r-new2">Create a maintenance request</button>' : ''}</div>`}
     ${info.length ? `<div class="section-title">Waiting on information</div>${info.map(reqCard).join('')}` : ''}
     ${closed.length ? `<div class="section-title">Recently triaged</div><div class="card">
@@ -638,7 +756,7 @@ function intakeModal() {
         is_emergency: fchk('r-emerg'), flag_safety: fchk('rf-safety'), flag_water: fchk('rf-water'),
         flag_electrical: fchk('rf-elec'), flag_hvac_out: fchk('rf-hvac')
       });
-      closeModal(); toast('Request submitted for triage'); render();
+      closeModal(); toast('Request received — Autopilot is classifying it'); render();
     } catch (e) { toast(e.message); }
   };
 }
@@ -781,16 +899,27 @@ async function renderWODetail(id) {
   const totalWorkMin = d.time.filter(t => t.kind === 'work' && t.minutes).reduce((s, t) => s + t.minutes, 0);
   const totalTravelMin = d.time.filter(t => t.kind === 'travel' && t.minutes).reduce((s, t) => s + t.minutes, 0);
   const myQuote = isVendor ? d.quotes.find(q => q.vendor_id === ME.vendor_id) : null;
+  const dispatchTechs = d.dispatch ? d.dispatch.technicians.slice(0, 3) : [];
+  const dispatchVendors = d.dispatch ? d.dispatch.vendors.slice(0, 2) : [];
 
   const checklist = d.completion.items.filter(i => i.required || i.done);
   const missing = d.completion.missing;
+  const evidenceTile = p => {
+    const insight = json(p.ai_analysis, null);
+    const label = p.ocr_status === 'queued' || p.ocr_status === 'processing' ? 'Analyzing…'
+      : p.ocr_status === 'not_configured' ? 'AI off · enter cost manually'
+      : insight && p.kind === 'receipt' ? `${insight.merchant || 'Receipt'} · ${money(insight.total)}`
+      : insight ? insight.visible_issue : '';
+    return `<div class="evidence-tile"><img src="${p.url}" loading="lazy" onclick="window.open('${p.url}')">
+      ${label ? `<span>${esc(label)}</span>` : ''}${!insight && p.kind !== 'receipt' ? `<button onclick="analyzePhoto(${p.id})">Analyze</button>` : ''}</div>`;
+  };
 
   shell(`
     <a class="more" href="${isTech ? '#/today' : isVendor ? '#/jobs' : '#/work-orders'}" style="font-size:13.5px">‹ Back</a>
     <div class="card" style="margin-top:10px">
-      <div class="s">${w.number} · ${esc(w.category)} · ${w.source === 'preventive' ? 'Preventive' : w.source === 'request' ? 'From request' : 'Manual'}</div>
+      <div class="s">${w.number} · ${esc(w.category)} · ${w.source === 'preventive' ? 'Preventive' : w.source === 'request' ? 'From request' : w.source === 'callback' ? 'Resident callback' : 'Manual'}</div>
       <h2 style="margin:4px 0 8px;font-family:var(--font-d);font-size:21px">${esc(w.title)}</h2>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${pri(w.priority)} ${chip(w.status)} ${w.overdue ? '<b style="color:var(--red);font-size:13px">OVERDUE</b>' : ''}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${pri(w.priority)} ${chip(w.status)} ${w.auto_assigned ? '<span class="auto-badge">Autopilot assigned</span>' : ''} ${w.accepted_at ? '<span class="verified">✓ Accepted</span>' : ''} ${w.overdue ? '<b style="color:var(--red);font-size:13px">OVERDUE</b>' : ''}</div>
       <div class="kv" style="margin-top:14px">
         <div><div class="k">Property</div><div class="v">${canRead() ? `<a href="#/properties/${w.property_id}" style="color:var(--pine)">${esc(w.property_name)}</a>` : esc(w.property_name)}${w.unit_label ? ' · Unit ' + esc(w.unit_label) : ''}</div></div>
         <div><div class="k">Address</div><div class="v"><span class="nav-link" onclick="openMaps('${esc(w.address)}, ${esc(w.city || '')}')">${ico('pin', 15)} ${esc(w.address)}${w.city ? ', ' + esc(w.city) : ''}</span></div></div>
@@ -804,6 +933,21 @@ async function renderWODetail(id) {
       ${w.completion_notes ? `<div style="margin-top:8px;padding:10px 12px;background:var(--pine-soft);border-radius:10px;font-size:13.5px"><b>Completion notes:</b> ${esc(w.completion_notes)}</div>` : ''}
       ${canWrite() && openStatus ? `<div class="pill-row"><button class="btn sec" onclick="editWO()">Edit / reassign</button>${w.status !== 'cancelled' ? `<button class="btn danger" onclick="woStatus('cancelled')">Cancel job</button>` : ''}</div>` : ''}
     </div>
+
+    ${d.callback_of ? `<div class="card callback-card"><div class="card-title">Priority callback</div><div class="s">Resident reopened this after <a href="#/work-orders/${d.callback_of.id}">${esc(d.callback_of.number)} · ${esc(d.callback_of.title)}</a>. Review the original evidence and avoid repeating the same repair.</div></div>` : ''}
+    ${d.callbacks && d.callbacks.length ? `<div class="card callback-card"><div class="card-title">Linked callbacks</div>${d.callbacks.map(c => `<a class="list-item" href="#/work-orders/${c.id}"><div class="body"><div class="t">${esc(c.number)} · ${esc(c.title)}</div><div class="s">Created ${fmtDateTime(c.created_at)}</div></div><div class="end">${chip(c.status)}</div></a>`).join('')}</div>` : ''}
+    ${d.resident_request ? `<div class="card resident-link-card"><div><div class="card-title">Resident closeout</div><div class="s">${esc(d.resident_request.reported_by || 'Resident')} · ${esc(d.resident_request.resident_status || 'received')}${d.resident_request.satisfaction_score ? ` · ${d.resident_request.satisfaction_score}/5` : ''}</div></div>
+      ${canRead() ? `<button class="btn sec" onclick="copyText('${location.origin}/#/track/${esc(d.resident_request.tracking_token)}')">Copy tracking link</button>` : '<span class="verified">Live thread</span>'}</div>
+      <div class="card"><div class="card-title">Resident conversation</div>
+        <div class="resident-thread staff-thread">${(d.resident_messages || []).length ? d.resident_messages.map(m => `<div class="resident-msg ${m.direction}">${m.attachment_url ? `<img src="${esc(m.attachment_url)}" alt="Resident maintenance update">` : ''}<div>${esc(m.body)}</div><span>${fmtDateTime(m.created_at)}</span></div>`).join('') : '<div class="s">No messages yet.</div>'}</div>
+        ${openStatus && ME.role !== 'viewer' ? `<div class="field" style="margin-top:12px"><textarea id="wo-resident-message" placeholder="Send an update or ask the resident a question…"></textarea></div><button class="btn sec full" onclick="sendResidentMessage()">Send to resident</button>` : ''}
+      </div>` : ''}
+    ${canWrite() && d.dispatch ? `<div class="card dispatch-card"><div class="card-title">Smart dispatch recommendation <span class="confidence">${Math.round(Math.max(d.dispatch.confidence || 0, d.dispatch.vendor_confidence || 0) * 100)}% confidence</span></div>
+      <div class="s" style="margin-bottom:8px">Scores combine trade skills, today’s workload, working hours, prior visits, similar-job performance, on-call status, and labor cost.</div>
+      ${dispatchTechs.map((t, index) => `<div class="dispatch-row ${index === 0 ? 'top' : ''}"><span class="dispatch-score">${t.score}</span><div class="body"><b>${esc(t.name)}</b><p>${esc(t.reason)}</p></div><button onclick="assignRecommended('technician',${t.id})">Assign</button></div>`).join('')}
+      ${dispatchVendors.length ? `<div class="s" style="font-weight:800;margin-top:10px">Vendor fallback</div>${dispatchVendors.map(v => `<div class="dispatch-row"><span class="dispatch-score">${v.score}</span><div class="body"><b>${esc(v.name)}</b><p>${esc(v.reason)}</p></div><button onclick="assignRecommended('vendor',${v.id})">Assign</button></div>`).join('')}` : ''}
+      ${!dispatchTechs.length && !dispatchVendors.length ? '<div class="s">No eligible technician or vendor profile is available.</div>' : ''}
+    </div>` : ''}
 
     ${pendingApproval ? `
     <div class="card" style="border-left:4px solid var(--amber)">
@@ -832,6 +976,7 @@ async function renderWODetail(id) {
     ${(isTech || isVendor) && openStatus ? `
     <div class="card">
       <div class="card-title">Job actions</div>
+      ${!w.accepted_at ? `<button class="btn sec full" style="margin-bottom:8px" onclick="acceptJob()">✓ Accept assignment</button>` : ''}
       ${!workActive && !travelActive && !arrivedAlready && ['assigned', 'scheduled', 'new', 'waiting_vendor'].includes(w.status) ? `<button class="btn pri full big" onclick="travelStart()">${ico('car', 20)} Start travel</button>` : ''}
       ${travelActive ? `<button class="btn pri full big" onclick="arrived()">${ico('pin', 20)} I've arrived</button>` : ''}
       ${!workActive && !travelActive ? (() => {
@@ -899,16 +1044,16 @@ async function renderWODetail(id) {
         ${openStatus && !isVendor || (isVendor && w.assigned_vendor_id === ME.vendor_id && openStatus) ? `<label class="photo-add">+<input type="file" accept="image/*" capture="environment" hidden onchange="uploadPhoto(this,'${k}')"></label>` : ''}</div>`;
       }).join('')}
       ${receipts.length || openStatus ? `<div class="s" style="font-weight:700;margin:6px 0 4px">Receipts (${receipts.length})</div>
-      <div class="photo-row">${receipts.map(p => `<img src="${p.url}" loading="lazy" onclick="window.open('${p.url}')">`).join('')}
+      <div class="photo-row evidence-row">${receipts.map(evidenceTile).join('')}
       ${openStatus ? `<label class="photo-add">+<input type="file" accept="image/*" capture="environment" hidden onchange="uploadPhoto(this,'receipt')"></label>` : ''}</div>` : ''}
       ${generalPhotos.length ? `<div class="s" style="font-weight:700;margin:6px 0 4px">Other</div>
-      <div class="photo-row">${generalPhotos.map(p => `<img src="${p.url}" loading="lazy" onclick="window.open('${p.url}')">`).join('')}</div>` : ''}
+      <div class="photo-row evidence-row">${generalPhotos.map(evidenceTile).join('')}</div>` : ''}
     </div>
 
     <div class="card">
       <div class="card-title">Materials & expenses</div>
       ${d.materials.map(m => `<div class="list-item"><div class="body"><div class="t">${esc(m.name)}</div><div class="s">${m.qty} × ${money(m.unit_cost)}</div></div><div class="end money">${money(m.qty * m.unit_cost)}</div></div>`).join('')}
-      ${d.expenses.filter(e => e.category !== 'materials').map(e => `<div class="list-item"><div class="body"><div class="t">${esc(e.description || e.category)}</div><div class="s">${esc(e.category)}</div></div><div class="end money">${money(e.amount)}</div></div>`).join('')}
+      ${d.expenses.filter(e => e.category !== 'materials').map(e => `<div class="list-item"><div class="body"><div class="t">${esc(e.description || e.category)}${e.source === 'receipt_ocr' ? ' <span class="auto-badge">Receipt capture</span>' : ''}</div><div class="s">${esc(e.category)}</div></div><div class="end money">${money(e.amount)}</div></div>`).join('')}
       ${!d.materials.length && !d.expenses.length ? '<div class="s">Nothing recorded yet.</div>' : ''}
       ${openStatus && !isVendor || (isVendor && w.assigned_vendor_id === ME.vendor_id && openStatus) ? `<div class="row2" style="margin-top:10px">
         <button class="btn sec full" onclick="addMaterial()">+ Material</button>
@@ -939,6 +1084,25 @@ async function renderWODetail(id) {
 /* --- WO detail action helpers --- */
 // Hand the destination to whichever maps app the tech already uses
 window.openMaps = addr => window.open('https://maps.google.com/?q=' + encodeURIComponent(addr), '_blank');
+window.acceptJob = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/accept`, {}); toast('Assignment accepted'); render(); } catch (e) { toast(e.message); } };
+window.assignRecommended = async (kind, id) => {
+  try {
+    await PATCH(`/work-orders/${CURRENT_WO.wo.id}`, kind === 'technician'
+      ? { assigned_user_id: id, assigned_vendor_id: null }
+      : { assigned_vendor_id: id, assigned_user_id: null });
+    toast('Assignment updated and resident notified'); render();
+  } catch (e) { toast(e.message); }
+};
+window.analyzePhoto = async id => {
+  try { await POST(`/photos/${id}/analyze`, {}); toast('Photo analysis queued — refresh in a moment'); render(); }
+  catch (e) { toast(e.message); }
+};
+window.sendResidentMessage = async () => {
+  const body = fv('wo-resident-message');
+  if (!body) return toast('Write a message first');
+  try { await POST(`/work-orders/${CURRENT_WO.wo.id}/resident-messages`, { body }); toast('Resident update sent'); render(); }
+  catch (e) { toast(e.message); }
+};
 window.travelStart = async () => { try { const r = await POST(`/work-orders/${CURRENT_WO.wo.id}/travel/start`, {}); toast(isQueued(r) ? 'Travel started — saved offline' : 'Travel started'); render(); } catch (e) { toast(e.message); } };
 window.arrived = async () => { try { const r = await POST(`/work-orders/${CURRENT_WO.wo.id}/arrived`, {}); toast(isQueued(r) ? 'Arrival saved offline' : 'Arrival recorded'); render(); } catch (e) { toast(e.message); } };
 window.woStart = async (override) => {
@@ -983,7 +1147,8 @@ window.uploadPhoto = async (input, kind) => {
   if (!input.files || !input.files[0]) return;
   const fd = new FormData();
   fd.append('photo', input.files[0]); fd.append('kind', kind);
-  try { const r = await api(`/work-orders/${CURRENT_WO.wo.id}/photos`, { method: 'POST', body: fd }); toast(isQueued(r) ? 'Photo saved — will upload when you reconnect' : 'Photo added'); render(); }
+  try { const r = await api(`/work-orders/${CURRENT_WO.wo.id}/photos`, { method: 'POST', body: fd });
+    toast(isQueued(r) ? 'Photo saved — will upload when you reconnect' : kind === 'receipt' && r.analysis_status === 'queued' ? 'Receipt added — cost extraction queued' : 'Photo added'); render(); }
   catch (e) { toast(e.message); }
 };
 window.addNote = async isVoice => {
@@ -1671,7 +1836,8 @@ window.markAllRead = async () => { try { await POST('/notifications/read', {}); 
 /* ---------------- notification prefs widget ---------------- */
 const NOTIF_KINDS = [['emergency', 'Emergency requests'], ['assigned', 'Job assigned to me'], ['approval', 'Approval requests'],
   ['approval_decision', 'Approval decisions'], ['completed', 'Jobs completed'], ['quote', 'Vendor quotes'],
-  ['pm_due', 'Preventive maintenance due'], ['repeat', 'Repeat-repair warnings'], ['request', 'New maintenance requests'], ['high_cost', 'Unusually high costs']];
+  ['pm_due', 'Preventive maintenance due'], ['repeat', 'Repeat-repair warnings'], ['request', 'New maintenance requests'],
+  ['high_cost', 'Unusually high costs'], ['weekly_digest', 'Weekly owner digest']];
 async function mountNotifPrefs(slotId) {
   const [prefs, status] = await Promise.all([GET('/notification-prefs'), GET('/push/status').catch(() => ({ devices: 0 }))]);
   const slot = document.getElementById(slotId);
@@ -1690,17 +1856,23 @@ async function mountNotifPrefs(slotId) {
         <button class="btn sec full" onclick="savePushover()">Save Pushover key</button>
       </details>
     </div>
+    <div class="channel-status"><span class="${status.delivery && status.delivery.email ? 'on' : ''}">Email ${status.delivery && status.delivery.email ? 'ready' : 'needs server setup'}</span>
+      <span class="${status.delivery && status.delivery.sms ? 'on' : ''}">SMS ${status.delivery && status.delivery.sms ? 'ready' : 'needs server setup'}</span></div>
     <div class="s" style="margin-bottom:6px;font-weight:700">What to send, per channel</div>
-    <div class="tglrow" style="font-size:12px;color:var(--muted);font-weight:700"><span></span><span style="display:flex;gap:22px"><span>In-app</span><span>Phone</span></span></div>
-    ${NOTIF_KINDS.map(([k, l]) => `<div class="tglrow"><span>${l}</span><span style="display:flex;gap:34px">
+    <div class="notif-head"><span></span><span>App</span><span>Push</span><span>Email</span><span>SMS</span></div>
+    ${NOTIF_KINDS.map(([k, l]) => `<div class="notif-grid"><span>${l}</span>
       <input type="checkbox" class="tgl npk" data-k="${k}" ${prefs[k] && prefs[k].in_app ? 'checked' : ''}>
       <input type="checkbox" class="tgl npp" data-k="${k}" ${prefs[k] && prefs[k].push ? 'checked' : ''}>
-    </span></div>`).join('')}
+      <input type="checkbox" class="tgl npe" data-k="${k}" ${prefs[k] && prefs[k].email ? 'checked' : ''}>
+      <input type="checkbox" class="tgl nps" data-k="${k}" ${prefs[k] && prefs[k].sms ? 'checked' : ''}>
+    </div>`).join('')}
     <button class="btn pri full" style="margin-top:10px" id="np-save">Save preferences</button>`;
   document.getElementById('np-save').onclick = async () => {
     const body = {};
     document.querySelectorAll('.npk').forEach(c => body[c.dataset.k] = { in_app: c.checked, push: 0, email: 0, sms: 0 });
     document.querySelectorAll('.npp').forEach(c => { if (body[c.dataset.k]) body[c.dataset.k].push = c.checked ? 1 : 0; });
+    document.querySelectorAll('.npe').forEach(c => { if (body[c.dataset.k]) body[c.dataset.k].email = c.checked ? 1 : 0; });
+    document.querySelectorAll('.nps').forEach(c => { if (body[c.dataset.k]) body[c.dataset.k].sms = c.checked ? 1 : 0; });
     try { await PUT('/notification-prefs', body); toast('Preferences saved'); } catch (e) { toast(e.message); }
   };
 }
@@ -1713,7 +1885,8 @@ async function renderSettings(qs) {
   loadingShell('#/settings');
   const params = new URLSearchParams(qs || '');
   const tab = params.get('tab') || 'org';
-  const TABS = [['org', 'Organization'], ['team', 'Team'], ['completion', 'Job requirements'], ['notifs', 'Notifications']];
+  const TABS = [['org', 'Organization'], ['autopilot', 'Autopilot'], ['team', 'Team'], ['completion', 'Job requirements'],
+    ['integrations', 'Integrations'], ['notifs', 'Notifications']];
   let inner = '';
   if (tab === 'org') {
     const org = await GET('/org');
@@ -1767,6 +1940,75 @@ async function renderSettings(qs) {
       </div>`;
   }
   if (tab === 'notifs') inner = `<div class="card"><div class="card-title">Notification preferences</div><div id="np-slot"><div class="skel"></div></div></div>`;
+  if (tab === 'autopilot') {
+    const [cfg, activity] = await Promise.all([GET('/automation/config'), GET('/automation/activity?limit=50')]);
+    const settingRow = (key, title, description) => `<div class="policy-toggle"><div><b>${title}</b><p>${description}</p></div>
+      <input type="checkbox" class="tgl ap-setting" data-key="${key}" ${cfg.settings[key] ? 'checked' : ''} ${canWrite() ? '' : 'disabled'}></div>`;
+    inner = `
+      <div class="card autopilot-settings-head"><div><span class="auto-live"><i></i> DETERMINISTIC AUTOMATION</span>
+        <h2>Let rules run the routine. Escalate uncertainty.</h2><p>AI may interpret a photo or receipt when configured. Your playbooks and spending rules—not AI—authorize every action.</p></div>
+        <div class="auto-score"><b>${cfg.metrics.rate}%</b><span>verified zero-touch</span></div></div>
+      <div class="card"><div class="card-title">Master controls</div>
+        ${settingRow('autopilot_enabled','Autopilot','Classify and advance new maintenance requests automatically.')}
+        ${settingRow('auto_create_wo','Create routine work orders','Convert policy-matched requests without manager triage.')}
+        ${settingRow('auto_assign','Smart dispatch','Assign only when skill, availability, workload, and confidence clear the threshold.')}
+        ${settingRow('auto_schedule','Automatic scheduling','Place urgent work today and routine work in the next business slot.')}
+        ${settingRow('resident_updates','Resident updates','Send magic-link progress messages, appointment confirmation, and closeout rating.')}
+        ${settingRow('weekly_digest','Weekly owner digest','Compile completed work, spend, exceptions, callbacks, and zero-touch performance.')}
+        ${settingRow('vendor_fallback','Vendor recommendations','Recommend an eligible vendor when no technician is a strong match.')}
+        ${settingRow('auto_vendor_emergency','Emergency vendor auto-assignment','Allow an emergency vendor assignment without a manager decision. Off by default.')}
+      </div>
+      <div class="section-title">Opinionated playbooks</div>
+      <div class="playbook-grid">${cfg.policies.map(p => `<div class="card playbook-card risk-${p.risk_level}">
+        <div class="playbook-title"><span>${esc(p.name)}</span><input type="checkbox" class="tgl ap-policy" data-key="${esc(p.policy_key)}" ${p.enabled ? 'checked' : ''} ${canWrite() ? '' : 'disabled'}></div>
+        <div class="s">${esc(p.risk_level)} risk · ${p.actions.length} automated steps</div>
+        <ol>${p.actions.map(a => `<li>${esc(a)}</li>`).join('')}</ol></div>`).join('')}</div>
+      <div class="section-title">SLA & escalation</div>
+      <div class="card table-wrap"><table class="data sla-table"><thead><tr><th>Priority</th><th>Accept in</th><th>Start in</th><th>Resolve in</th></tr></thead><tbody>
+        ${cfg.slas.map(s => `<tr data-priority="${s.priority}"><td>${pri(s.priority)}</td>
+          <td><input class="ap-ack" type="number" value="${s.acknowledge_minutes}" ${canWrite() ? '' : 'disabled'}> min</td>
+          <td><input class="ap-start" type="number" value="${s.start_minutes}" ${canWrite() ? '' : 'disabled'}> min</td>
+          <td><input class="ap-resolve" type="number" value="${s.resolve_hours}" ${canWrite() ? '' : 'disabled'}> hr</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="card delivery-card"><div class="card-title">Optional interpretation & delivery</div>
+        <div class="delivery-grid"><div class="${cfg.delivery.ai ? 'ready' : ''}"><b>Photo / receipt AI</b><span>${cfg.delivery.ai ? 'Ready' : 'Set OPENAI_API_KEY'}</span></div>
+          <div class="${cfg.delivery.email ? 'ready' : ''}"><b>Email</b><span>${cfg.delivery.email ? 'Ready' : 'Set Resend variables'}</span></div>
+          <div class="${cfg.delivery.sms ? 'ready' : ''}"><b>SMS</b><span>${cfg.delivery.sms ? 'Ready' : 'Set Twilio variables'}</span></div></div>
+      </div>
+      ${canWrite() ? `<button class="btn pri full" id="ap-save">Save Autopilot policy</button>
+        <div class="row2" style="margin-top:10px"><button class="btn sec full" onclick="runAutomation('sla_scan')">Run exception scan</button><button class="btn sec full" onclick="runAutomation('digest')">Create owner digest now</button></div>` : ''}
+      <div class="section-title">Activity log</div><div class="card automation-feed">
+        ${activity.length ? activity.map(a => `<div class="automation-row"><span class="automation-check">${a.status === 'undone' ? '↶' : '✓'}</span>
+          <div class="body"><b>${esc(a.action.replace(/_/g, ' '))}</b><p>${esc(a.reason || '')}</p><small>${fmtDateTime(a.created_at)} · ${a.status}</small></div>
+          ${a.can_undo && canWrite() ? `<button onclick="undoAutomation(${a.id})">Undo</button>` : ''}</div>`).join('') : '<div class="empty">No automated actions yet.</div>'}
+      </div>`;
+  }
+  if (tab === 'integrations') {
+    const data = await GET('/integrations');
+    const statusLabel = ready => ready ? '<span class="integration-ready">Ready</span>' : '<span class="integration-off">Not configured</span>';
+    inner = `
+      <div class="card"><div class="card-title">PMS & accounting bridge</div>
+        <div class="s" style="margin-bottom:12px">Keep your property-management or accounting system as the system of record. Import the roster, export clean costs, and sync events through signed webhooks.</div>
+        <div class="integration-actions"><a class="btn sec" href="/api/integrations/export/accounting.csv">Export accounting CSV</a>
+          <a class="btn sec" href="/api/integrations/export/work-orders.csv">Export work orders CSV</a>
+          ${canWrite() ? '<button class="btn pri" id="int-import">Import properties / units</button>' : ''}</div>
+        <input id="int-file" type="file" accept=".csv,text/csv" hidden>
+        <details style="margin-top:12px"><summary class="s" style="cursor:pointer;font-weight:700">CSV format</summary>
+          <div class="code-sample">property_name,address,city,state,zip,type,year_built,unit_label,beds,baths,sqft,occupied</div></details>
+      </div>
+      <div class="card"><div class="card-title">Delivery adapters</div><div class="integration-status">
+        <div><b>Email (Resend)</b>${statusLabel(data.delivery.email)}</div><div><b>SMS (Twilio)</b>${statusLabel(data.delivery.sms)}</div><div><b>Photo / receipt AI</b>${statusLabel(data.delivery.ai)}</div>
+      </div></div>
+      <div class="section-title">Webhooks ${canWrite() ? '<button class="more" id="int-new">+ Endpoint ›</button>' : ''}</div>
+      <div class="card">${data.webhooks.length ? data.webhooks.map(w => `<div class="webhook-row">
+        <div class="body"><div><b>${esc(w.name)}</b> <span class="chip ${w.active ? 'completed' : 'cancelled'}">${w.direction}</span></div>
+          <div class="s mono webhook-url">${esc(w.direction === 'inbound' ? location.origin + '/api/integrations/inbound/' + w.inbound_token : w.url)}</div>
+          <div class="s">Events: ${esc(w.event_types || '*')}</div></div>
+        <div class="webhook-actions"><button data-copy="${esc(w.direction === 'inbound' ? location.origin + '/api/integrations/inbound/' + w.inbound_token : w.url)}" onclick="copyText(this.dataset.copy)">Copy</button>
+          ${w.direction === 'outbound' && w.active ? `<button onclick="testWebhook(${w.id})">Test</button>` : ''}
+          ${canWrite() ? `<button onclick="toggleWebhook(${w.id},${w.active ? 'false' : 'true'})">${w.active ? 'Pause' : 'Enable'}</button>` : ''}</div></div>`).join('') : '<div class="empty">No endpoints yet. Add an inbound endpoint for PMS requests or an outbound endpoint for events.</div>'}</div>
+      ${data.runs.length ? `<div class="section-title">Recent syncs</div><div class="card">${data.runs.slice(0, 12).map(r => `<div class="list-item"><div class="body"><div class="t">${esc(r.provider)} · ${esc(r.entity)}</div><div class="s">${r.direction} · ${esc(r.detail || '')}</div></div><div class="end"><span class="chip ${r.status === 'success' ? 'completed' : 'cancelled'}">${r.status}</span><div class="s">${fmtDateTime(r.created_at)}</div></div></div>`).join('')}</div>` : ''}`;
+  }
   if (tab === 'team') {
     const t = await GET('/team/users');
     const ROLE_DESC = { owner: 'Full control incl. billing-level settings', manager: 'Runs day-to-day operations', technician: 'Sees only assigned jobs', viewer: 'Read-only owner view (investors, accountants)', vendor: 'Sees only their company\'s jobs' };
@@ -1775,8 +2017,9 @@ async function renderSettings(qs) {
         ${t.users.map(u => `
           <div class="list-item">
             <div class="body"><div class="t">${esc(u.name)} ${u.id === ME.id ? '<span class="s">(you)</span>' : ''} ${!u.active ? '<span class="chip cancelled">Deactivated</span>' : ''}</div>
-            <div class="s">${esc(u.email)} · <b>${u.role}</b></div></div>
-            ${canWrite() && u.id !== ME.id ? `<div class="end"><button class="btn sec" style="padding:6px 10px;font-size:12px" onclick='manageUser(${JSON.stringify({ id: u.id, name: u.name, role: u.role, active: u.active }).replace(/'/g, "&#39;")})'>Manage</button></div>` : ''}
+            <div class="s">${esc(u.email)} · <b>${u.role}</b>${u.role === 'technician' && u.skills ? ` · ${esc((() => { try { return JSON.parse(u.skills).join(', '); } catch (e) { return u.skills; } })())}` : ''}</div></div>
+            ${canWrite() ? `<div class="end team-actions">${u.role === 'technician' ? `<button onclick='dispatchProfile(${JSON.stringify({ id: u.id, name: u.name, skills: u.skills, service_area: u.service_area, work_days: u.work_days, shift_start: u.shift_start, shift_end: u.shift_end, max_daily_minutes: u.max_daily_minutes, auto_assign: u.auto_assign, emergency_on_call: u.emergency_on_call }).replace(/'/g, "&#39;")})'>Dispatch</button>` : ''}
+              ${u.id !== ME.id ? `<button onclick='manageUser(${JSON.stringify({ id: u.id, name: u.name, role: u.role, active: u.active }).replace(/'/g, "&#39;")})'>Manage</button>` : ''}</div>` : ''}
           </div>`).join('')}
       </div>
       ${t.invites.length ? `<div class="card"><div class="card-title">Pending invites</div>
@@ -1821,6 +2064,63 @@ async function renderSettings(qs) {
     };
   }
   if (tab === 'notifs') mountNotifPrefs('np-slot');
+  if (tab === 'autopilot' && canWrite()) {
+    const save = document.getElementById('ap-save');
+    if (save) save.onclick = async () => {
+      const settings = {};
+      document.querySelectorAll('.ap-setting').forEach(input => settings[input.dataset.key] = input.checked);
+      const policies = [...document.querySelectorAll('.ap-policy')].map(input => ({ policy_key: input.dataset.key, enabled: input.checked }));
+      const slas = [...document.querySelectorAll('.sla-table tbody tr')].map(row => ({ priority: row.dataset.priority,
+        acknowledge_minutes: +row.querySelector('.ap-ack').value, start_minutes: +row.querySelector('.ap-start').value,
+        resolve_hours: +row.querySelector('.ap-resolve').value, enabled: true }));
+      try { await PUT('/automation/config', { settings, policies, slas }); toast('Autopilot policy saved'); render(); }
+      catch (e) { toast(e.message); }
+    };
+  }
+  if (tab === 'integrations' && canWrite()) {
+    const choose = document.getElementById('int-import');
+    const file = document.getElementById('int-file');
+    if (choose && file) {
+      choose.onclick = () => file.click();
+      file.onchange = async () => {
+        if (!file.files[0]) return;
+        choose.disabled = true; choose.textContent = 'Importing…';
+        try {
+          const csv = await file.files[0].text();
+          const result = await POST('/integrations/import/properties', { csv });
+          toast(`${result.properties_created} properties and ${result.units_created} units imported`); await bootMeta(); render();
+        } catch (e) { toast(e.message); choose.disabled = false; choose.textContent = 'Import properties / units'; }
+      };
+    }
+    const add = document.getElementById('int-new');
+    if (add) add.onclick = () => {
+      modal(`<h3>Add integration endpoint</h3>
+        <div class="field"><label>Name</label><input id="wh-name" placeholder="Buildium requests or accounting sync"></div>
+        <div class="field"><label>Direction</label><select id="wh-direction"><option value="inbound">Inbound — receive maintenance requests</option><option value="outbound">Outbound — send Steadhold events</option></select></div>
+        <div class="field" id="wh-url-wrap" style="display:none"><label>Public webhook URL</label><input id="wh-url" type="url" placeholder="https://example.com/webhooks/steadhold"></div>
+        <div class="field" id="wh-events-wrap" style="display:none"><label>Events (comma-separated, or *)</label><input id="wh-events" value="request.converted,work_order.completed,exception.created,digest.created"></div>
+        <button class="btn pri full" id="wh-go">Create endpoint</button>`);
+      const direction = document.getElementById('wh-direction');
+      direction.onchange = () => {
+        const outbound = direction.value === 'outbound';
+        document.getElementById('wh-url-wrap').style.display = outbound ? 'block' : 'none';
+        document.getElementById('wh-events-wrap').style.display = outbound ? 'block' : 'none';
+      };
+      document.getElementById('wh-go').onclick = async () => {
+        try {
+          const outbound = fv('wh-direction') === 'outbound';
+          const result = await POST('/integrations/webhooks', { name: fv('wh-name'), direction: fv('wh-direction'),
+            url: outbound ? fv('wh-url') : undefined,
+            event_types: outbound ? (fv('wh-events') === '*' ? '*' : fv('wh-events').split(',').map(s => s.trim()).filter(Boolean)) : '*' });
+          closeModal();
+          const value = result.inbound_path ? location.origin + result.inbound_path : result.secret;
+          modal(`<h3>Endpoint created</h3><div class="s" style="margin-bottom:10px">${result.inbound_path ? 'Use this private URL as the destination for maintenance_request events.' : 'Save this signing secret now. It is used for X-Steadhold-Signature.'}</div>
+            <div class="field"><input id="wh-result" readonly value="${esc(value)}" onclick="this.select()"></div>
+            <button class="btn pri full" onclick="copyText(document.getElementById('wh-result').value);closeModal();render()">Copy & finish</button>`);
+        } catch (e) { toast(e.message); }
+      };
+    }
+  }
   if (tab === 'team' && canWrite()) {
     const b = document.getElementById('tm-invite');
     if (b) b.onclick = () => {
@@ -1853,6 +2153,43 @@ window.copyInvite = token => { navigator.clipboard.writeText(location.origin + '
 window.revokeInvite = id => confirmModal('Revoke this invite?', 'The link will stop working immediately.', async () => {
   try { await POST(`/team/invites/${id}/revoke`, {}); closeModal(); render(); } catch (e) { toast(e.message); }
 }, 'Revoke');
+window.copyText = async value => {
+  try { await navigator.clipboard.writeText(value); toast('Copied'); }
+  catch (e) { toast('Select and copy the value manually'); }
+};
+window.testWebhook = async id => {
+  try { await POST(`/integrations/webhooks/${id}/test`, {}); toast('Test delivery queued'); }
+  catch (e) { toast(e.message); }
+};
+window.toggleWebhook = async (id, active) => {
+  try { await PATCH(`/integrations/webhooks/${id}`, { active }); toast(active ? 'Endpoint enabled' : 'Endpoint paused'); render(); }
+  catch (e) { toast(e.message); }
+};
+window.dispatchProfile = u => {
+  let skills = [];
+  try { skills = JSON.parse(u.skills || '[]'); } catch (e) { skills = String(u.skills || '').split(','); }
+  const days = String(u.work_days || '1,2,3,4,5').split(',');
+  modal(`<h3>Dispatch profile · ${esc(u.name)}</h3>
+    <div class="s" style="margin-bottom:12px">Smart dispatch scores skill fit, scheduled load, availability, property familiarity, performance, and cost.</div>
+    <div class="field"><label>Skills (comma-separated)</label><input id="dp-skills" value="${esc(skills.join(', '))}" placeholder="Plumbing, HVAC, Electrical"></div>
+    <div class="field"><label>Service area</label><input id="dp-area" value="${esc(u.service_area || '')}" placeholder="Jacksonville, Westside"></div>
+    <div class="field"><label>Working days</label><div class="day-picker">${[['1','Mon'],['2','Tue'],['3','Wed'],['4','Thu'],['5','Fri'],['6','Sat'],['0','Sun']].map(([n,l]) => `<label><input type="checkbox" class="dp-day" value="${n}" ${days.includes(n) ? 'checked' : ''}>${l}</label>`).join('')}</div></div>
+    <div class="row2"><div class="field"><label>Shift starts</label><input id="dp-start" type="time" value="${u.shift_start || '08:00'}"></div>
+      <div class="field"><label>Shift ends</label><input id="dp-end" type="time" value="${u.shift_end || '17:00'}"></div></div>
+    <div class="field"><label>Daily capacity (minutes)</label><input id="dp-capacity" type="number" value="${u.max_daily_minutes || 480}"></div>
+    <div class="tglrow"><span>Eligible for high-confidence auto-assignment</span><input type="checkbox" class="tgl" id="dp-auto" ${u.auto_assign == null || u.auto_assign ? 'checked' : ''}></div>
+    <div class="tglrow"><span>Emergency on-call</span><input type="checkbox" class="tgl" id="dp-oncall" ${u.emergency_on_call ? 'checked' : ''}></div>
+    <button class="btn pri full" style="margin-top:12px" id="dp-save">Save dispatch profile</button>`);
+  document.getElementById('dp-save').onclick = async () => {
+    try {
+      await PUT(`/team/users/${u.id}/profile`, { skills: fv('dp-skills').split(',').map(s => s.trim()).filter(Boolean),
+        service_area: fv('dp-area'), work_days: [...document.querySelectorAll('.dp-day:checked')].map(d => d.value).join(','),
+        shift_start: fv('dp-start'), shift_end: fv('dp-end'), max_daily_minutes: +fv('dp-capacity'),
+        auto_assign: fchk('dp-auto'), emergency_on_call: fchk('dp-oncall') });
+      closeModal(); toast('Dispatch profile saved'); render();
+    } catch (e) { toast(e.message); }
+  };
+};
 window.manageUser = u => {
   modal(`<h3>${esc(u.name)}</h3>
     <div class="field"><label>Role</label><select id="mu-role">
@@ -1918,6 +2255,7 @@ async function routeRender() {
   const hash = location.hash || '#/';
   const [path, qs] = hash.split('?');
   if (path.startsWith('#/report/')) return renderReport(path.split('/')[2]);
+  if (path.startsWith('#/track/')) return renderTrack(path.split('/')[2]);
   if (!ME) {
     if (path.startsWith('#/join')) return renderJoin(qs);
     try { ME = await GET('/auth/me'); await bootMeta(); }
