@@ -1,5 +1,5 @@
 /* Steadhold service worker — offline app shell + push notifications */
-const SHELL = 'steadhold-shell-v1';
+const SHELL = 'steadhold-shell-v3';
 const SHELL_FILES = ['/', '/index.html', '/css/app.css', '/js/app.js', '/js/offline.js', '/icon.svg', '/manifest.json'];
 
 self.addEventListener('install', e => {
