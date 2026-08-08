@@ -76,7 +76,9 @@ function ok(cond, name, extra) {
   console.log('\nTECH WORKFLOW + COMPLETION REQUIREMENTS');
   ok((await call('tech', 'POST', `/work-orders/${conv.id}/travel/start`)).status === 200, 'travel start');
   ok((await call('tech', 'POST', `/work-orders/${conv.id}/arrived`)).status === 200, 'arrived');
-  ok((await call('tech', 'POST', `/work-orders/${conv.id}/time/start`)).status === 200, 'work timer start');
+  const tStart = await call('tech', 'POST', `/work-orders/${conv.id}/time/start`);
+  ok(tStart.status === 400 && tStart.data.needs === 'before_photo', 'Plumbing job blocks work start until a before photo exists');
+  ok((await call('manager', 'POST', `/work-orders/${conv.id}/time/start`, { override: true })).status === 200, 'work timer starts after manager override');
   const blocked = await call('tech', 'PATCH', `/work-orders/${conv.id}`, { status: 'completed', completion_notes: 'done' });
   ok(blocked.status === 400 && blocked.data.missing && blocked.data.missing.length >= 2, 'completion blocked; missing items listed (Plumbing needs photos)');
   const ovr = await call('manager', 'PATCH', `/work-orders/${conv.id}`, { status: 'completed', completion_notes: 'done', override: true, override_note: 'test' });
@@ -137,7 +139,7 @@ function ok(cond, name, extra) {
   const pubPost = await fetch(BASE + '/intake/' + tok, { method: 'POST', body: fd });
   const pubData = await pubPost.json();
   ok(pubPost.status === 200 && /^REQ-\d+$/.test(pubData.reference), 'tenant submits with photo, gets a reference number');
-  const reqRow = (await call('manager', 'GET', '/requests')).data.find(r => r.description.includes('AUTOTEST public tenant'));
+  const reqRow = (await call('manager', 'GET', '/requests')).data.filter(r => r.description.includes('AUTOTEST public tenant')).sort((a, b) => b.id - a.id)[0];
   ok(reqRow && reqRow.reporter_type === 'tenant' && reqRow.flag_water === 1, 'submission lands in triage with tenant fields');
   ok(reqRow.photos.length === 1, 'intake photo visible in triage queue');
   const pconv = (await call('manager', 'POST', `/requests/${reqRow.id}/triage`, { action: 'convert', title: 'AUTOTEST tenant WO', assigned_user_id: 3 })).data;
@@ -153,7 +155,7 @@ function ok(cond, name, extra) {
   rfd.append('category', 'Appliance'); rfd.append('description', 'AUTOTEST routed dishwasher issue padding');
   rfd.append('reported_by', 'T'); rfd.append('reporter_phone', '904');
   await fetch(BASE + '/intake/' + tok, { method: 'POST', body: rfd });
-  let heldReq = (await call('owner', 'GET', '/requests')).data.find(r => r.description.includes('AUTOTEST routed dishwasher'));
+  let heldReq = (await call('owner', 'GET', '/requests')).data.filter(r => r.description.includes('AUTOTEST routed dishwasher')).sort((a, b) => b.id - a.id)[0];
   ok(heldReq && heldReq.status === 'owner_review', 'non-emergency tenant request held for owner review');
   ok((await call('manager', 'POST', `/requests/${heldReq.id}/triage`, { action: 'convert', title: 'x' })).status === 403, 'manager cannot triage a held request');
   ok((await call('manager', 'POST', `/requests/${heldReq.id}/review`, { action: 'release' })).status === 403, 'manager cannot release a held request');
@@ -164,16 +166,31 @@ function ok(cond, name, extra) {
   efd.append('category', 'Plumbing'); efd.append('description', 'AUTOTEST routed emergency burst padding');
   efd.append('reported_by', 'T'); efd.append('reporter_phone', '904'); efd.append('is_emergency', '1');
   await fetch(BASE + '/intake/' + tok, { method: 'POST', body: efd });
-  const emReq = (await call('owner', 'GET', '/requests')).data.find(r => r.description.includes('AUTOTEST routed emergency'));
+  const emReq = (await call('owner', 'GET', '/requests')).data.filter(r => r.description.includes('AUTOTEST routed emergency')).sort((a, b) => b.id - a.id)[0];
   ok(emReq && emReq.status === 'open' && emReq.priority === 'emergency', 'emergencies bypass owner review');
   ok((await call('owner', 'PATCH', '/properties/1', { tenant_routing: 'maintenance' })).status === 200, 'routing restored to direct');
   ok((await call('viewer', 'POST', '/requests', { property_id: 2, category: 'Roofing', description: 'AUTOTEST viewer request padding' })).status === 200, 'viewer (owner persona) can submit a request');
-  const vReq = (await call('owner', 'GET', '/requests')).data.find(r => r.description.includes('AUTOTEST viewer request'));
+  const vReq = (await call('owner', 'GET', '/requests')).data.filter(r => r.description.includes('AUTOTEST viewer request')).sort((a, b) => b.id - a.id)[0];
   ok(vReq && vReq.reporter_type === 'owner', 'viewer submission recorded as owner-reported');
 
   const rot = await call('manager', 'POST', '/properties/1/intake-token/rotate');
   ok(rot.status === 200 && rot.data.intake_token !== tok, 'token rotation issues a new link');
   ok((await fetch(BASE + '/intake/' + tok)).status === 404, 'old link dead after rotation');
+
+  console.log('\nBEFORE-PHOTO GATE & UNIT OCCUPANCY');
+  const gw = (await call('manager', 'POST', '/work-orders', { property_id: 1, category: 'HVAC', title: 'AUTOTEST gate', assigned_user_id: 3 })).data;
+  const gStart = await call('tech', 'POST', `/work-orders/${gw.id}/time/start`);
+  ok(gStart.status === 400 && gStart.data.needs === 'before_photo', 'work cannot start until the before photo is taken');
+  ok((await call('manager', 'POST', `/work-orders/${gw.id}/time/start`, { override: true, override_note: 't' })).status === 200, 'manager can override the before-photo gate');
+  const gHist = (await call('owner', 'GET', '/work-orders/' + gw.id)).data.history;
+  ok(gHist.some(h => h.action === 'before_photo_override'), 'before-photo override is audit-logged');
+  const gp = (await call('manager', 'POST', '/work-orders', { property_id: 1, category: 'Pest', title: 'AUTOTEST gate pest', assigned_user_id: 3 })).data;
+  ok((await call('tech', 'POST', `/work-orders/${gp.id}/time/start`)).status === 200, 'categories without a before-photo requirement start freely');
+  const nu = (await call('manager', 'POST', '/properties/1/units', { label: 'AUTOTESTU' })).data;
+  const nuRow = (await call('manager', 'GET', '/properties/1')).data.units.find(x => x.id === nu.id);
+  ok(nuRow && nuRow.occupied === 0, 'newly added units default to vacant, not occupied');
+  ok((await call('manager', 'PATCH', '/units/' + nu.id, { occupied: 1 })).status === 200, 'unit occupancy can be toggled');
+  ok((await call('viewer', 'PATCH', '/units/' + nu.id, { occupied: 0 })).status === 403, 'viewers cannot change occupancy');
 
   console.log('\nPHONE PUSH');
   const vk = await call('owner', 'GET', '/push/vapid-public-key');
