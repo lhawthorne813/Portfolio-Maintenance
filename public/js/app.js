@@ -309,7 +309,7 @@ function renderJoin(qs) {
     };
   }).catch(() => {
     $app.innerHTML = `<div class="login-wrap"><div class="login-card"><div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
-      <div class="err">This invitation link is no longer valid. Ask your manager to send a new one.</div>
+      <div class="err">This invitation link is no longer valid. Ask whoever invited you to send a new one.</div>
       <button class="btn pri full" onclick="location.hash='#/login';location.reload()">Go to sign in</button></div></div>`;
   });
 }
@@ -805,13 +805,24 @@ async function renderWODetail(id) {
     <div class="card" style="border-left:4px solid var(--amber)">
       <div class="card-title">Approval pending — ${money(pendingApproval.amount)}</div>
       <div class="s" style="margin-bottom:4px">${esc(pendingApproval.requested_by_name)}${pendingApproval.reason ? ' — ' + esc(pendingApproval.reason) : ''}</div>
-      ${pendingApproval.required_role === 'owner' ? `<div class="s" style="font-weight:700;color:#9A6B00;margin-bottom:8px">Over ${money(d.approval_t2)} — requires an owner's sign-off</div>` : ''}
+      ${pendingApproval.required_role === 'owner' && d.has_managers ? `<div class="s" style="font-weight:700;color:#9A6B00;margin-bottom:8px">Over ${money(d.approval_t2)} — needs the owner's sign-off</div>` : ''}
       ${canWrite() && (pendingApproval.required_role !== 'owner' || ME.role === 'owner') ? `
       <div class="row2" style="margin-top:6px">
         <button class="btn pri full" onclick="decide(${pendingApproval.id},'approved')">Approve</button>
         <button class="btn sec full" onclick="decide(${pendingApproval.id},'declined')">Decline</button>
       </div><button class="btn sec full" style="margin-top:8px" onclick="decide(${pendingApproval.id},'info_requested')">Request more info</button>` :
-      canWrite() ? `<div class="s">Only an owner can decide this approval.</div>` : ''}
+      canWrite() ? `<div class="s">This one is the owner's call.</div>` : ''}
+    </div>` : ''}
+
+    ${(isTech || isVendor) && d.supervisor ? `
+    <div class="card contact-card">
+      <div class="card-title">Questions on this job?</div>
+      <div class="s" style="margin-bottom:10px">${esc(d.supervisor.name)} — ${d.supervisor.role === 'owner' ? 'owner' : 'manager'}</div>
+      <div class="row2">
+        ${d.supervisor.phone ? `<a class="btn pri full" href="tel:${esc(d.supervisor.phone.replace(/[^0-9+]/g, ''))}">Call</a>
+        <a class="btn sec full" href="sms:${esc(d.supervisor.phone.replace(/[^0-9+]/g, ''))}">Text</a>`
+        : d.supervisor.email ? `<a class="btn sec full" href="mailto:${esc(d.supervisor.email)}">Email</a><span></span>` : '<span class="s">No contact details on file.</span>'}
+      </div>
     </div>` : ''}
 
     ${(isTech || isVendor) && openStatus ? `
@@ -948,7 +959,7 @@ window.openComplete = () => {
     ${missing.length ? `<div class="err" style="margin-bottom:10px">Still needed: ${missing.map(m => m.label).join(', ')}. Close this and add them${canWrite() ? ', or override below' : ''}.</div>` : ''}
     <div class="field"><label>Completion notes${d.completion.items.some(i => i.key === 'completion_notes' && i.required) ? ' (required)' : ''}</label><textarea id="cmp-notes" placeholder="What was done, parts used, anything the owner should know…"></textarea></div>
     ${canWrite() && missing.length ? `
-      <div class="tglrow"><span><b>Manager override</b> — complete anyway</span><input type="checkbox" class="tgl" id="cmp-ovr"></div>
+      <div class="tglrow"><span><b>${ME.role === 'owner' ? 'Owner' : 'Manager'} override</b> — complete anyway</span><input type="checkbox" class="tgl" id="cmp-ovr"></div>
       <div class="field" id="ovr-note-w" style="display:none"><label>Override reason (logged)</label><input id="cmp-ovr-note"></div>` : ''}
     <button class="btn pri full" id="cmp-go" ${missing.length && !canWrite() ? 'disabled' : ''}>Complete job</button>`);
   const ovr = document.getElementById('cmp-ovr');
@@ -1012,7 +1023,9 @@ window.addExpense = () => {
 window.requestApproval = () => {
   const t1 = CURRENT_WO.approval_t1, t2 = CURRENT_WO.approval_t2;
   modal(`<h3>Request spending approval</h3>
-    <div class="s" style="margin-bottom:10px">Under ${money(t1)}: no approval needed. ${money(t1)}–${money(t2)}: manager. Over ${money(t2)}: owner.</div>
+    <div class="s" style="margin-bottom:10px">${CURRENT_WO.has_managers
+      ? `Under ${money(t1)}: no approval needed. ${money(t1)}–${money(t2)}: manager signs off. Over ${money(t2)}: owner signs off.`
+      : `Under ${money(t1)} you don't need approval. Anything above goes to the owner.`}</div>
     <div class="field"><label>Estimated amount ($)</label><input id="a-amt" type="number" inputmode="decimal" step="0.01"></div>
     <div class="field"><label>What's needed and why</label><textarea id="a-reason"></textarea></div>
     <button class="btn pri full" id="a-go">Send request</button>`);
@@ -1268,6 +1281,7 @@ async function renderPropertyDetail(id, qs) {
         <button class="btn sec full" style="margin-top:8px" onclick="rotateIntake(${p.id})">Reset link (old one stops working)</button>
         <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px">
           <div class="s" style="font-weight:700;margin-bottom:6px">Where do tenant requests go first?</div>
+          ${META.has_managers === false ? `<div class="s" style="color:var(--muted);margin-bottom:6px">You handle maintenance directly, so both options reach you — this matters once you add a manager.</div>` : ''}
           <div class="tglrow"><span>Straight to maintenance triage</span><input type="radio" name="rt${p.id}" class="tgl" ${p.tenant_routing !== 'owner' ? 'checked' : ''} onchange="setRouting(${p.id},'maintenance')" ${ME.role === 'owner' ? '' : 'disabled'}></div>
           <div class="tglrow"><span>Owner reviews first, then releases to maintenance</span><input type="radio" name="rt${p.id}" class="tgl" ${p.tenant_routing === 'owner' ? 'checked' : ''} onchange="setRouting(${p.id},'owner')" ${ME.role === 'owner' ? '' : 'disabled'}></div>
           <div class="s" style="color:var(--muted);margin-top:4px">Emergencies always go straight to maintenance regardless of this setting.${ME.role === 'owner' ? '' : ' Only an owner can change routing.'}</div>
@@ -1698,12 +1712,17 @@ async function renderSettings(qs) {
           <div class="field"><label>Primary market</label><input id="o-market" value="${esc(org.primary_market || '')}" ${ro}></div>
         </div>
       </div>
-      <div class="card"><div class="card-title">Approval tiers</div>
-        <div class="s" style="margin-bottom:10px">Spending under the first amount needs no approval. Between the two: a manager can approve. Above the second: only an owner.</div>
-        <div class="row2">
-          <div class="field"><label>Manager approval above ($)</label><input id="o-t1" type="number" value="${org.approval_t1}" ${ro}></div>
-          <div class="field"><label>Owner approval above ($)</label><input id="o-t2" type="number" value="${org.approval_t2}" ${ro}></div>
-        </div>
+      <div class="card"><div class="card-title">Spending approval</div>
+        ${org.has_managers
+          ? `<div class="s" style="margin-bottom:10px">Spending under the first amount needs no approval. Between the two, a manager can sign off. Above the second, it's the owner's call.</div>
+             <div class="row2">
+               <div class="field"><label>Needs approval above ($)</label><input id="o-t1" type="number" value="${org.approval_t1}" ${ro}></div>
+               <div class="field"><label>Owner must approve above ($)</label><input id="o-t2" type="number" value="${org.approval_t2}" ${ro}></div>
+             </div>`
+          : `<div class="s" style="margin-bottom:10px">You're running without a manager, so every approval comes to you. Set the amount a technician can spend before asking.</div>
+             <div class="field"><label>Needs your approval above ($)</label><input id="o-t1" type="number" value="${org.approval_t1}" ${ro}></div>
+             <input id="o-t2" type="hidden" value="${org.approval_t2}">
+             <div class="s" style="color:var(--muted)">Add a manager under Team and a middle tier appears automatically.</div>`}
       </div>
       ${ME.role === 'owner' ? `<button class="btn pri full" id="o-save">Save organization settings</button>` : ''}`;
   }
