@@ -192,6 +192,22 @@ function ok(cond, name, extra) {
   ok((await call('manager', 'PATCH', '/units/' + nu.id, { occupied: 1 })).status === 200, 'unit occupancy can be toggled');
   ok((await call('viewer', 'PATCH', '/units/' + nu.id, { occupied: 0 })).status === 403, 'viewers cannot change occupancy');
 
+  console.log('\nOWNER-RUN TEAM (no manager)');
+  const soloMeta = (await call('org2', 'GET', '/meta')).data;
+  ok(soloMeta.has_managers === false, 'org with no manager reports a flat team');
+  ok(soloMeta.supervisor && soloMeta.supervisor.role === 'owner', 'the owner is the contact when there is no manager');
+  const pineMeta = (await call('owner', 'GET', '/meta')).data;
+  ok(pineMeta.has_managers === true, 'org with a manager still reports the manager layer');
+  const soloProp = (await call('org2', 'GET', '/properties')).data[0];
+  const soloWo = (await call('org2', 'POST', '/work-orders', { property_id: soloProp.id, category: 'Plumbing', title: 'AUTOTEST solo job' })).data;
+  const soloDet = (await call('org2', 'GET', '/work-orders/' + soloWo.id)).data;
+  ok(soloDet.has_managers === false && soloDet.supervisor.role === 'owner', 'job detail carries the owner as the contact');
+  const soloAp = (await call('org2', 'POST', `/work-orders/${soloWo.id}/approvals`, { amount: 200, reason: 'parts' })).data;
+  ok(soloAp.required_role === 'owner' && soloAp.single_tier === true, 'mid-range approval routes to the owner when no manager exists');
+  ok((await call('org2', 'PATCH', '/approvals/' + soloAp.id, { decision: 'approved' })).status === 200, 'owner approves it directly');
+  const tieredAp = (await call('tech', 'POST', `/work-orders/${cw.id}/approvals`, { amount: 200, reason: 'parts' })).data;
+  ok(tieredAp.required_role === 'manager', 'the manager tier still applies in orgs that have managers');
+
   console.log('\nOFFLINE SYNC IDEMPOTENCY');
   const idWo = (await call('manager', 'POST', '/work-orders', { property_id: 1, category: 'General', title: 'AUTOTEST idem' })).data;
   async function opCall(op, body) {
