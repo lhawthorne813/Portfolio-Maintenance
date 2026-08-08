@@ -500,3 +500,33 @@ html,body{overflow-x:hidden}
 
 /* Direct line to the person running the job — owner or manager, whoever it is */
 .contact-card{border-left:4px solid var(--pine)}
+
+/* ============ Property identity: informative, not decorative ============
+   The old cards used a random gradient and initials ("2Hs"), which encoded
+   nothing. The mark now shows unit count — the first thing you actually
+   want to know about a rental property. */
+.pmark{width:54px;height:54px;border-radius:13px;background:var(--pine-soft);color:var(--pine);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;flex-shrink:0;line-height:1}
+.pmark .n{font-family:var(--font-d);font-weight:800;font-size:21px;letter-spacing:-.5px}
+.pmark .u{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;opacity:.75;margin-top:2px}
+.pmark.lg{width:64px;height:64px;border-radius:15px}
+.pmark.lg .n{font-size:25px}
+
+.prop-card{padding:14px 15px;border:1px solid var(--line);box-shadow:var(--shadow)}
+.pc-top{display:flex;align-items:flex-start;gap:13px}
+.pc-id{flex:1;min-width:0}
+.pc-id b{font-family:var(--font-d);font-size:16px;font-weight:700;display:block;line-height:1.25}
+.pc-id .s{font-size:12.5px;color:var(--muted);margin-top:2px}
+.pc-type{font-size:11.5px!important;text-transform:uppercase;letter-spacing:.5px;font-weight:600;color:var(--muted)}
+.pc-stats{display:flex;flex-wrap:wrap;gap:6px 18px;margin-top:10px;padding-top:9px;border-top:1px solid var(--line)}
+.pc-stats span{font-size:12px;color:var(--muted);white-space:nowrap}
+.pc-stats b{font-family:var(--font-d);font-size:14px;font-weight:800;color:var(--ink);letter-spacing:-.2px;margin-right:3px}
+.pc-stats span.on b{color:var(--amber)}
+
+.prop-head{display:flex;gap:14px;align-items:flex-start;margin:14px 0 16px}
+.prop-head h1{font-family:var(--font-d);font-size:22px;font-weight:800;letter-spacing:-.4px;line-height:1.2}
+.prop-head .s{font-size:13px;color:var(--muted);margin-top:3px}
+.nav-link.plain{background:none;padding:0;margin-top:4px;color:var(--pine)}
+
+/* Health ring: green is fine, amber needs attention, red is a problem */
+.health .ring{width:38px;height:38px;font-size:13px;font-weight:800;font-family:var(--font-d)}
