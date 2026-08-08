@@ -24,7 +24,7 @@ node test/api.test.js   # run the 57-check test suite (server must be running)
 - **Team management** — invite links (owner/manager/technician/viewer/vendor), role changes, deactivation (history preserved), last-owner protection.
 - **Richer intake + triage queue** — tenant-context fields (access, permission to enter, pets, availability), emergency + safety/water/electrical/HVAC flags, and triage actions: convert (carries access info to the WO), re-prioritize, need-info, duplicate, reject. Converted/closed requests can't be re-triaged.
 - **Configurable completion requirements** — per-category checklists (before/after photo, notes, materials, receipt, time). Enforced server-side; managers can override with a logged reason.
-- **Technician flow** — Start Travel → Arrived → Start Work (travel and work time tracked separately), big-button UI, completion checklist modal.
+- **Technician flow** — Start Travel → Arrived → Start Work (travel and work time tracked separately), big-button UI, completion checklist modal. Where a category requires a *before* photo, work cannot start until it is taken (enforced server-side; managers can override with a logged reason) — a before photo taken after the repair is worthless.
 - **Tiered approvals** — under T1: none; T1–T2: manager; over T2: owner only (managers get 403). Tiers editable in Settings.
 - **Vendor quotes** — request from multiple vendors, vendors see and submit only their own, approving one assigns the job and declines the rest.
 - **Attention Center dashboard** — grouped actionable cards: emergencies, approvals, overdue, triage, repeat repairs, PM overdue, cost anomalies, repair-vs-replace, quotes to review.
