@@ -1,4 +1,4 @@
-// api.js — V2 REST API. Every query is scoped to the authenticated user's organization (server-side).
+// api.js — V3 REST API. Every private query is scoped to the authenticated user's organization server-side.
 // Cross-org access returns 404 so record existence is never confirmed to outsiders.
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -9,6 +9,8 @@ const fs = require('fs');
 const QRCode = require('qrcode');
 const db = require('./db');
 const push = require('./push');
+const notifications = require('./notifications');
+const automation = require('./automation');
 const I = require('./insights');
 const { OPEN_STATUSES } = I;
 
@@ -73,16 +75,12 @@ function hist(orgId, woId, userId, action, detail, oldVal, newVal) {
 }
 let APP_URL = process.env.APP_URL || '';
 function notify(orgId, userIds, kind, title, body, link) {
-  const ins = db.prepare('INSERT INTO notifications (organization_id,user_id,kind,title,body,link,created_at) VALUES (?,?,?,?,?,?,?)');
-  const pref = db.prepare('SELECT in_app FROM notification_prefs WHERE user_id=? AND kind=?');
-  for (const uid of [].concat(userIds).filter(Boolean)) {
-    const p = pref.get(uid, kind);
-    if (!p || p.in_app) ins.run(orgId, uid, kind, title, body || null, link || null, now());
-    // Phone delivery (web push to registered devices + Pushover if configured) — independent of the in-app feed
-    try { push.deliverToPhone(uid, kind, title, body, link, APP_URL); } catch (e) {}
-  }
+  notifications.notify(orgId, userIds, kind, title, body, link);
 }
-function captureAppUrl(req) { if (!APP_URL) APP_URL = `${req.protocol}://${req.get('host')}`; }
+function captureAppUrl(req) {
+  if (!APP_URL) APP_URL = `${req.protocol}://${req.get('host')}`;
+  notifications.setAppUrl(APP_URL);
+}
 // Many small operators run without a manager: the owner works directly with the technician.
 // Where that's true, the app collapses the manager tier instead of implying a person who doesn't exist.
 function hasManagers(orgId) {
@@ -144,27 +142,7 @@ function completionCheck(orgId, wo, pendingNotes) {
 }
 
 /* ---------------- Preventive maintenance generation ---------------- */
-function generatePMWorkOrders() {
-  const due = db.prepare(`SELECT s.*, p.name AS property_name FROM pm_schedules s JOIN properties p ON p.id=s.property_id
-    WHERE s.active=1 AND s.next_due <= date('now','+7 days')`).all();
-  for (const s of due) {
-    const exists = db.prepare(`SELECT id FROM work_orders WHERE pm_schedule_id=? AND status NOT IN ('completed','cancelled')`).get(s.id);
-    if (exists) continue;
-    const num = nextWONumber(s.organization_id);
-    const status = (s.assigned_user_id || s.assigned_vendor_id) ? 'assigned' : 'new';
-    const id = db.prepare(`INSERT INTO work_orders (organization_id,number,property_id,asset_id,category,title,description,instructions,
-        priority,status,assigned_user_id,assigned_vendor_id,due_date,estimated_minutes,source,pm_schedule_id,created_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(s.organization_id, num, s.property_id, s.asset_id, s.category, s.title,
-        'Auto-generated from preventive maintenance schedule.', s.instructions, 'normal', status,
-        s.assigned_user_id || null, s.assigned_vendor_id || null, s.next_due, s.estimated_minutes || 60, 'preventive', s.id, now()).lastInsertRowid;
-    hist(s.organization_id, id, null, 'created', 'Generated from preventive maintenance schedule');
-    notify(s.organization_id, mgmtIds(s.organization_id), 'pm_due', 'Preventive maintenance due',
-      `${s.title} — ${s.property_name} (due ${s.next_due}). ${num} created.`, '#/work-orders/' + id);
-    if (s.assigned_user_id) notify(s.organization_id, s.assigned_user_id, 'assigned', 'PM job assigned', `${s.title} — ${s.property_name}`, '#/work-orders/' + id);
-  }
-  return due.length;
-}
+const generatePMWorkOrders = automation.generatePMWorkOrders;
 
 /* =====================================================================
    AUTH: login, signup (creates organization), invite acceptance
@@ -201,6 +179,7 @@ router.post('/auth/signup', (req, res) => {
     VALUES (?,'*',0,1,1,0,0,1)`).run(orgId);
   setSetting(orgId, 'approval_t1', 150);
   setSetting(orgId, 'approval_t2', 500);
+  automation.ensureOrgDefaults(orgId);
   req.session.userId = uid;
   res.json({ id: uid, name: b.name, email, role: 'owner', org_name: b.org_name, onboarding: true });
 });
@@ -264,17 +243,18 @@ router.post('/intake/:token', intakeRateLimit, upload.array('photos', 3), (req, 
   const emergency = b.is_emergency === '1' || b.is_emergency === 'true' || b.is_emergency === true;
   // Owner-review routing: non-emergency tenant requests can be held for the owner before maintenance sees them.
   const ownerFirst = p.tenant_routing === 'owner' && !emergency;
+  const trackingToken = crypto.randomBytes(24).toString('base64url');
   const id = db.prepare(`INSERT INTO requests (organization_id,property_id,unit_id,category,description,priority,
       reported_by,reporter_type,reporter_phone,reporter_email,access_instructions,permission_to_enter,pets,
-      preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,status,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,status,tracking_token,automation_state,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(p.organization_id, p.id, +b.unit_id || null, b.category, desc, emergency ? 'emergency' : 'normal',
       String(b.reported_by).slice(0, 120), 'tenant', String(b.reporter_phone).slice(0, 40), (b.reporter_email || '').slice(0, 120) || null,
       (b.access_instructions || '').slice(0, 300) || null, (b.permission_to_enter === '1' || b.permission_to_enter === 'true') ? 1 : 0,
       (b.pets || '').slice(0, 120) || null, (b.preferred_availability || '').slice(0, 200) || null,
       emergency ? 1 : 0, b.flag_safety === '1' ? 1 : 0, b.flag_water === '1' ? 1 : 0,
       b.flag_electrical === '1' ? 1 : 0, b.flag_hvac_out === '1' ? 1 : 0,
-      ownerFirst ? 'owner_review' : 'open', now()).lastInsertRowid;
+      ownerFirst ? 'owner_review' : 'open', trackingToken, 'queued', now()).lastInsertRowid;
   for (const f of (req.files || []))
     db.prepare(`INSERT INTO photos (organization_id,request_id,property_id,kind,url,caption,created_at)
       VALUES (?,?,?,?,?,?,?)`).run(p.organization_id, id, p.id, 'general', '/uploads/' + f.filename, 'Tenant intake photo', now());
@@ -289,7 +269,142 @@ router.post('/intake/:token', intakeRateLimit, upload.array('photos', 3), (req, 
       emergency ? `🚨 EMERGENCY tenant request: ${b.category}` : `New tenant request: ${b.category}`,
       `${p.name} — ${desc.slice(0, 120)}${photoNote}`, '#/maintenance');
   }
-  res.json({ ok: true, reference: 'REQ-' + id, emergency });
+  automation.onRequestCreated(id);
+  res.json({ ok: true, reference: 'REQ-' + id, emergency, tracking_token: trackingToken,
+    tracking_url: '/#/track/' + trackingToken });
+});
+
+function trackedRequest(token) {
+  if (!token || token.length < 24) return null;
+  return db.prepare(`SELECT r.*,p.name property_name,o.name org_name,u.label unit_label,
+      w.id wo_id,w.number,w.title wo_title,w.status wo_status,w.priority wo_priority,w.scheduled_date,w.due_date,
+      w.completed_at,w.completion_notes,w.assigned_user_id,w.assigned_vendor_id,
+      tu.name tech_name,v.company vendor_company
+    FROM requests r JOIN properties p ON p.id=r.property_id JOIN organizations o ON o.id=r.organization_id
+    LEFT JOIN units u ON u.id=r.unit_id LEFT JOIN work_orders w ON w.id=r.work_order_id
+    LEFT JOIN users tu ON tu.id=w.assigned_user_id LEFT JOIN vendors v ON v.id=w.assigned_vendor_id
+    WHERE r.tracking_token=?`).get(token);
+}
+
+// Magic-link resident thread: status, two-way replies, appointment confirmation,
+// satisfaction, and a linked callback when a repair did not hold.
+router.get('/track/:token', (req, res) => {
+  captureAppUrl(req);
+  const r = trackedRequest(req.params.token);
+  if (!r) return notFound(res);
+  const messages = db.prepare(`SELECT id,direction,channel,body,attachment_url,created_at FROM resident_messages
+    WHERE request_id=? ORDER BY created_at`).all(r.id);
+  res.json({
+    request: { reference: 'REQ-' + r.id, category: r.category, description: r.description, status: r.status,
+      playbook: r.playbook, resident_status: r.resident_status, created_at: r.created_at,
+      satisfaction_score: r.satisfaction_score, permission_to_enter: !!r.permission_to_enter },
+    property: { name: r.property_name, unit: r.unit_label, organization: r.org_name },
+    work_order: r.wo_id ? { id: r.wo_id, number: r.number, title: r.wo_title, status: r.wo_status,
+      priority: r.wo_priority, scheduled_date: r.scheduled_date, due_date: r.due_date,
+      completed_at: r.completed_at, completion_notes: r.completion_notes,
+      assigned_to: r.tech_name || r.vendor_company || null, appointment_confirmed: !!r.resident_confirmed_at } : null,
+    messages
+  });
+});
+
+router.post('/track/:token/messages', intakeRateLimit, (req, res, next) => {
+  req.trackedRequest = trackedRequest(req.params.token);
+  if (!req.trackedRequest) return notFound(res);
+  next();
+}, upload.single('photo'), (req, res) => {
+  const r = req.trackedRequest;
+  const attachment = req.file ? '/uploads/' + req.file.filename : null;
+  const body = String((req.body || {}).body || '').trim().slice(0, 1200) || (attachment ? 'Photo update' : '');
+  if (!body) return res.status(400).json({ error: 'Please enter a message or attach a photo' });
+  const id = db.prepare(`INSERT INTO resident_messages
+    (organization_id,request_id,work_order_id,direction,channel,body,attachment_url,created_at)
+    VALUES (?,?,?,'inbound','portal',?,?,?)`).run(r.organization_id, r.id, r.wo_id || null, body, attachment, now()).lastInsertRowid;
+  db.prepare(`UPDATE requests SET last_resident_message_at=?,resident_status='replied',
+    status=CASE WHEN status='info_needed' THEN 'open' ELSE status END WHERE id=?`).run(now(), r.id);
+  notify(r.organization_id, mgmtIds(r.organization_id), 'request', `Resident replied: REQ-${r.id}`,
+    `${r.property_name} — ${body.slice(0, 160)}${attachment ? ' · photo attached' : ''}`, r.wo_id ? '#/work-orders/' + r.wo_id : '#/maintenance');
+  automation.ensureException(r.organization_id, 'resident_reply', 'action', `Resident reply needs review: REQ-${r.id}`,
+    `${body.slice(0, 220)}${attachment ? ' · photo attached' : ''}`, r.wo_id ? 'work_order' : 'request', r.wo_id || r.id, null);
+  if (r.status === 'info_needed') automation.onRequestCreated(r.id);
+  res.json({ id, attachment_url: attachment, created_at: now() });
+});
+
+router.post('/track/:token/actions', intakeRateLimit, (req, res) => {
+  const r = trackedRequest(req.params.token);
+  if (!r) return notFound(res);
+  const action = (req.body || {}).action;
+  if (action === 'confirm_appointment') {
+    if (!r.wo_id || !r.scheduled_date) return res.status(400).json({ error: 'There is no appointment to confirm yet' });
+    db.prepare(`UPDATE requests SET resident_confirmed_at=?,resident_status='appointment_confirmed' WHERE id=?`).run(now(), r.id);
+    db.prepare(`UPDATE work_orders SET resident_confirmed_at=? WHERE id=?`).run(now(), r.wo_id);
+    db.prepare(`INSERT INTO resident_messages (organization_id,request_id,work_order_id,direction,channel,body,created_at)
+      VALUES (?,?,?,'system','portal',?,?)`).run(r.organization_id, r.id, r.wo_id, `Appointment confirmed for ${r.scheduled_date}.`, now());
+    automation.resolveExceptions(r.organization_id, 'work_order', r.wo_id, ['resident_confirmation']);
+    notify(r.organization_id, r.assigned_user_id || mgmtIds(r.organization_id), 'request', 'Resident confirmed appointment',
+      `${r.number} · ${r.property_name} · ${r.scheduled_date}`, '#/work-orders/' + r.wo_id);
+    return res.json({ ok: true });
+  }
+  if (action === 'permission_to_enter') {
+    db.prepare('UPDATE requests SET permission_to_enter=? WHERE id=?').run(req.body.value ? 1 : 0, r.id);
+    return res.json({ ok: true });
+  }
+  if (action === 'satisfied') {
+    if (r.wo_status !== 'completed') return res.status(400).json({ error: 'The work order is not complete yet' });
+    const score = Math.max(1, Math.min(5, +req.body.score || 5));
+    db.prepare(`UPDATE requests SET satisfaction_score=?,resident_status='closed' WHERE id=?`).run(score, r.id);
+    automation.resolveExceptions(r.organization_id, 'work_order', r.wo_id);
+    if (score <= 2) automation.ensureException(r.organization_id, 'resident_unsatisfied', 'critical',
+      `Resident reports repair may not be fixed: ${r.number}`, `Satisfaction score ${score}/5`, 'work_order', r.wo_id, now());
+    return res.json({ ok: true, score });
+  }
+  if (action === 'reopen') {
+    if (r.wo_status !== 'completed') return res.status(400).json({ error: 'Only a completed repair can be reopened' });
+    const active = db.prepare(`SELECT id,number FROM work_orders WHERE callback_of_id=? AND status NOT IN ('completed','cancelled')`).get(r.wo_id);
+    if (active) return res.json({ ok: true, id: active.id, number: active.number, existing: true });
+    const number = nextWONumber(r.organization_id);
+    const id = db.prepare(`INSERT INTO work_orders
+      (organization_id,number,property_id,unit_id,category,title,description,instructions,priority,status,
+       assigned_user_id,scheduled_date,due_date,estimated_minutes,source,callback_of_id,created_at,management_touches,auto_assigned)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)`).run(r.organization_id, number, r.property_id, r.unit_id,
+        r.category, `Callback — ${r.wo_title}`, `Resident reports the completed repair did not resolve the issue. ${String(req.body.note || '').slice(0, 500)}`,
+        r.access_instructions || null, 'high', r.assigned_user_id ? 'scheduled' : 'new', r.assigned_user_id || null,
+        new Date(Date.now() + 86400000).toISOString().slice(0, 10), new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10),
+        60, 'callback', r.wo_id, now(), r.assigned_user_id ? 1 : 0).lastInsertRowid;
+    db.prepare(`UPDATE requests SET work_order_id=?,status='converted',resident_status='reopened',reopened_at=? WHERE id=?`).run(id, now(), r.id);
+    hist(r.organization_id, id, null, 'created', `Resident reopened ${r.number}; linked callback created`);
+    automation.logEvent(r.organization_id, 'callback', 'work_order', id, 'callback_created',
+      `Resident reported ${r.number} was not resolved`, 1, null);
+    if (r.assigned_user_id) notify(r.organization_id, r.assigned_user_id, 'assigned', 'Callback assigned', `${number} — ${r.wo_title}`, '#/work-orders/' + id);
+    else automation.ensureException(r.organization_id, 'dispatch_needed', 'critical', `Dispatch callback: ${number}`,
+      `Resident reopened ${r.number}`, 'work_order', id, now());
+    notifications.residentUpdate(r.id, `${number} was created as a priority callback linked to ${r.number}. The team has been alerted.`, 'Repair reopened', id);
+    return res.json({ ok: true, id, number });
+  }
+  res.status(400).json({ error: 'Unknown action' });
+});
+
+// Token-scoped inbound integration for a PMS or form provider. The token is
+// generated in Settings and limits the caller to this organization.
+router.post('/integrations/inbound/:token', (req, res) => {
+  const endpoint = db.prepare(`SELECT * FROM webhook_endpoints WHERE inbound_token=? AND direction='inbound' AND active=1`).get(req.params.token);
+  if (!endpoint) return notFound(res);
+  const b = req.body || {};
+  if (b.event !== 'maintenance_request') return res.status(400).json({ error: 'Supported event: maintenance_request' });
+  const p = db.prepare('SELECT id FROM properties WHERE id=? AND organization_id=? AND active=1').get(b.property_id, endpoint.organization_id);
+  if (!p || !b.description) return res.status(400).json({ error: 'A valid property_id and description are required' });
+  if (b.unit_id && !db.prepare('SELECT 1 FROM units WHERE id=? AND property_id=? AND organization_id=?').get(b.unit_id, p.id, endpoint.organization_id))
+    return res.status(400).json({ error: 'unit_id must belong to the selected property' });
+  const trackingToken = crypto.randomBytes(24).toString('base64url');
+  const id = db.prepare(`INSERT INTO requests
+    (organization_id,property_id,unit_id,category,description,priority,reported_by,reporter_type,reporter_phone,
+     reporter_email,status,tracking_token,automation_state,created_at) VALUES (?,?,?,?,?,?,?,?,? ,?,'open',?,'queued',?)`)
+    .run(endpoint.organization_id, p.id, b.unit_id || null, b.category || 'General', String(b.description).slice(0, 2000),
+      VALID_PRIORITIES.includes(b.priority) ? b.priority : 'normal', b.reported_by || endpoint.name, 'integration',
+      b.reporter_phone || null, b.reporter_email || null, trackingToken, now()).lastInsertRowid;
+  automation.onRequestCreated(id);
+  db.prepare(`INSERT INTO integration_runs (organization_id,provider,direction,entity,records,status,detail,created_at)
+    VALUES (?,?, 'inbound','request',1,'success',?,?)`).run(endpoint.organization_id, endpoint.name, `REQ-${id}`, now());
+  res.status(202).json({ id, reference: 'REQ-' + id, tracking_url: '/#/track/' + trackingToken });
 });
 
 router.use(requireAuth);
@@ -320,16 +435,36 @@ router.use((req, res, next) => {
   };
   next();
 });
-// Housekeeping: op records only need to outlive a device being offline
-setInterval(() => { try { db.prepare(`DELETE FROM client_ops WHERE created_at < datetime('now','-30 days')`).run(); } catch (e) {} }, 6 * 60 * 60 * 1000);
+// Housekeeping runs through the durable worker so a restart cannot lose it.
 
 /* =====================================================================
    TEAM MANAGEMENT (Settings → Team)
 ===================================================================== */
 router.get('/team/users', MGMT_READ, (req, res) => {
-  const users = db.prepare(`SELECT id,name,email,phone,role,vendor_id,active,created_at FROM users WHERE organization_id=? ORDER BY active DESC, role, name`).all(req.oid);
+  const users = db.prepare(`SELECT u.id,u.name,u.email,u.phone,u.role,u.vendor_id,u.hourly_rate,u.active,u.created_at,
+      p.skills,p.service_area,p.work_days,p.shift_start,p.shift_end,p.max_daily_minutes,p.auto_assign,p.emergency_on_call
+    FROM users u LEFT JOIN technician_profiles p ON p.user_id=u.id
+    WHERE u.organization_id=? ORDER BY u.active DESC,u.role,u.name`).all(req.oid);
   const invites = db.prepare(`SELECT id,email,name,role,token,status,created_at FROM invites WHERE organization_id=? AND status='pending' ORDER BY created_at DESC`).all(req.oid);
   res.json({ users, invites });
+});
+
+router.put('/team/users/:id/profile', MGMT_WRITE, (req, res) => {
+  const user = db.prepare(`SELECT * FROM users WHERE id=? AND organization_id=? AND role='technician'`).get(req.params.id, req.oid);
+  if (!user) return notFound(res);
+  const b = req.body || {};
+  const skills = Array.isArray(b.skills) ? b.skills.map(String).filter(Boolean).slice(0, 20) : String(b.skills || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 20);
+  const capacity = Math.max(60, Math.min(960, +b.max_daily_minutes || 480));
+  db.prepare(`INSERT INTO technician_profiles
+    (user_id,organization_id,skills,service_area,work_days,shift_start,shift_end,max_daily_minutes,auto_assign,emergency_on_call,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET skills=excluded.skills,service_area=excluded.service_area,
+    work_days=excluded.work_days,shift_start=excluded.shift_start,shift_end=excluded.shift_end,max_daily_minutes=excluded.max_daily_minutes,
+    auto_assign=excluded.auto_assign,emergency_on_call=excluded.emergency_on_call,updated_at=excluded.updated_at`)
+    .run(user.id, req.oid, JSON.stringify(skills), String(b.service_area || '').slice(0, 200) || null,
+      String(b.work_days || '1,2,3,4,5'), /^\d\d:\d\d$/.test(b.shift_start || '') ? b.shift_start : '08:00',
+      /^\d\d:\d\d$/.test(b.shift_end || '') ? b.shift_end : '17:00', capacity,
+      b.auto_assign === false ? 0 : 1, b.emergency_on_call ? 1 : 0, now());
+  res.json({ ok: true });
 });
 router.post('/team/invites', MGMT_WRITE, (req, res) => {
   const { email, name, role, vendor_id } = req.body || {};
@@ -417,7 +552,7 @@ router.post('/push/unsubscribe', (req, res) => {
 router.get('/push/status', (req, res) => {
   const u = db.prepare('SELECT pushover_key FROM users WHERE id=?').get(req.user.id);
   res.json({ devices: push.subscriptionCount(req.user.id), pushover_configured: !!(u && u.pushover_key),
-    pushover_available: !!process.env.PUSHOVER_TOKEN });
+    pushover_available: !!process.env.PUSHOVER_TOKEN, delivery: notifications.deliveryStatus() });
 });
 router.patch('/push/pushover-key', (req, res) => {
   const key = (req.body.key || '').trim().slice(0, 60);
@@ -426,7 +561,7 @@ router.patch('/push/pushover-key', (req, res) => {
 });
 
 router.get('/notification-prefs', (req, res) => {
-  const kinds = ['emergency', 'assigned', 'approval', 'approval_decision', 'overdue', 'completed', 'quote', 'pm_due', 'repeat', 'asset_warning', 'request', 'high_cost'];
+  const kinds = ['emergency', 'assigned', 'approval', 'approval_decision', 'overdue', 'completed', 'quote', 'pm_due', 'repeat', 'asset_warning', 'request', 'high_cost', 'weekly_digest'];
   const prefs = {};
   kinds.forEach(k => prefs[k] = { in_app: 1, push: 1, email: 0, sms: 0 });
   db.prepare('SELECT * FROM notification_prefs WHERE user_id=?').all(req.user.id)
@@ -502,12 +637,25 @@ router.get('/dashboard', MGMT_READ, (req, res) => {
     WHERE p.organization_id=? AND p.active=1 GROUP BY p.id ORDER BY total DESC`).all(O)
     .map(r => ({ ...r, total: +r.total.toFixed(2), per_unit: r.unit_count ? +(r.total / r.unit_count).toFixed(2) : 0 }));
 
+  const autoMetrics = automation.metrics(O);
+  const exceptions = db.prepare(`SELECT * FROM exceptions WHERE organization_id=? AND status='open'
+    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'action' THEN 1 ELSE 2 END, created_at LIMIT 30`).all(O)
+    .map(x => ({ ...x, link: x.source_type === 'work_order' ? '#/work-orders/' + x.source_id :
+      x.source_type === 'request' ? '#/maintenance' : '#/dashboard' }));
+  const automatedToday = db.prepare(`SELECT id,event_type,source_type,source_id,action,reason,confidence,status,undo_payload,created_at
+    FROM automation_events WHERE organization_id=? AND created_at>=date('now') ORDER BY created_at DESC LIMIT 20`).all(O)
+    .map(x => ({ ...x, can_undo: !!x.undo_payload && x.status === 'applied', link: x.source_type === 'work_order' ? '#/work-orders/' + x.source_id : null }));
+
   res.json({
     stats: { open, urgent, overdue, completed_month: completedMonth,
       spend_month: +spendMonth.toFixed(2), spend_prev_month: +spendPrev.toFixed(2), spend_ytd: +spendYTD.toFixed(2),
-      avg_completion_days: avgDays ? +avgDays.toFixed(1) : null },
+      avg_completion_days: avgDays ? +avgDays.toFixed(1) : null,
+      verified_zero_touch_rate: autoMetrics.rate },
     status_counts: statusCounts,
     attention,
+    exceptions,
+    automated_today: automatedToday,
+    automation: autoMetrics,
     spend_by_property: spendByProperty
   });
 });
@@ -548,8 +696,9 @@ router.get('/comparison', MGMT_READ, (req, res) => {
 router.post('/properties', MGMT_WRITE, (req, res) => {
   const { name, address, city, state, zip, type, year_built, notes } = req.body || {};
   if (!name || !address) return res.status(400).json({ error: 'Name and address are required' });
-  const id = db.prepare(`INSERT INTO properties (organization_id,name,address,city,state,zip,type,year_built,notes)
-    VALUES (?,?,?,?,?,?,?,?,?)`).run(req.oid, name, address, city || null, state || null, zip || null, type || null, +year_built || null, notes || null).lastInsertRowid;
+  const id = db.prepare(`INSERT INTO properties (organization_id,name,address,city,state,zip,type,year_built,notes,intake_token)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(req.oid, name, address, city || null, state || null, zip || null, type || null,
+      +year_built || null, notes || null, crypto.randomBytes(12).toString('hex')).lastInsertRowid;
   res.json({ id });
 });
 
@@ -722,23 +871,27 @@ router.post('/requests', (req, res) => {
   const b = req.body || {};
   const prop = db.prepare('SELECT id,name FROM properties WHERE id=? AND organization_id=?').get(b.property_id, req.oid);
   if (!prop) return notFound(res);
+  if (b.unit_id && !db.prepare('SELECT 1 FROM units WHERE id=? AND property_id=? AND organization_id=?').get(b.unit_id, prop.id, req.oid))
+    return res.status(400).json({ error: 'Unit must belong to the selected property' });
   if (!b.category || !b.description) return res.status(400).json({ error: 'Category and description are required' });
   if (b.priority && !VALID_PRIORITIES.includes(b.priority)) return res.status(400).json({ error: 'Invalid priority' });
   const pri = b.is_emergency ? 'emergency' : (b.priority || 'normal');
+  const trackingToken = crypto.randomBytes(24).toString('base64url');
   const id = db.prepare(`INSERT INTO requests (organization_id,property_id,unit_id,category,description,priority,
       reported_by,reporter_type,reporter_phone,reporter_email,access_instructions,permission_to_enter,pets,
-      preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,created_by,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      preferred_availability,is_emergency,flag_safety,flag_water,flag_electrical,flag_hvac_out,created_by,tracking_token,automation_state,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
     .run(req.oid, prop.id, b.unit_id || null, b.category, b.description, pri,
       b.reported_by || req.user.name, b.reporter_type || (req.user.role === 'viewer' ? 'owner' : 'manager'), b.reporter_phone || null, b.reporter_email || null,
       b.access_instructions || null, b.permission_to_enter ? 1 : 0, b.pets || null,
       b.preferred_availability || null, b.is_emergency ? 1 : 0,
       b.flag_safety ? 1 : 0, b.flag_water ? 1 : 0, b.flag_electrical ? 1 : 0, b.flag_hvac_out ? 1 : 0,
-      req.user.id, now()).lastInsertRowid;
+      req.user.id, trackingToken, 'queued', now()).lastInsertRowid;
   if (pri === 'emergency' || pri === 'high')
     notify(req.oid, mgmtIds(req.oid), 'request', `${pri === 'emergency' ? 'Emergency' : 'Urgent'} request: ${b.category}`,
       `${prop.name} — ${b.description.slice(0, 120)}`, '#/maintenance');
-  res.json({ id });
+  automation.onRequestCreated(id);
+  res.json({ id, tracking_token: trackingToken, tracking_url: '/#/track/' + trackingToken });
 });
 
 function getReqOr404(req, res) {
@@ -757,6 +910,7 @@ router.post('/requests/:id/review', requireRole('owner'), (req, res) => {
     const prop = db.prepare('SELECT name FROM properties WHERE id=?').get(r.property_id);
     notify(req.oid, mgmtIds(req.oid).filter(id => id !== req.user.id), 'request',
       `Owner-approved request: ${r.category}`, `${prop.name} — ${r.description.slice(0, 120)}`, '#/maintenance');
+    automation.onRequestCreated(r.id);
     return res.json({ ok: true });
   }
   if (action === 'reject') {
@@ -776,13 +930,30 @@ router.post('/requests/:id/triage', MGMT_WRITE, (req, res) => {
   if (action === 'priority') {
     if (!VALID_PRIORITIES.includes(req.body.priority)) return res.status(400).json({ error: 'Invalid priority' });
     db.prepare('UPDATE requests SET priority=? WHERE id=?').run(req.body.priority, r.id);
+    automation.logEvent(req.oid, 'manual', 'request', r.id, 'priority_changed',
+      `${req.user.name} changed priority to ${req.body.priority}`, 1, null, req.user.id);
     return res.json({ ok: true });
   }
-  if (action === 'reject') { db.prepare(`UPDATE requests SET status='rejected', triage_note=? WHERE id=?`).run(req.body.note || null, r.id); return res.json({ ok: true }); }
-  if (action === 'duplicate') { db.prepare(`UPDATE requests SET status='duplicate', triage_note=? WHERE id=?`).run(req.body.note || null, r.id); return res.json({ ok: true }); }
-  if (action === 'info') { db.prepare(`UPDATE requests SET status='info_needed', triage_note=? WHERE id=?`).run(req.body.note || null, r.id); return res.json({ ok: true }); }
+  if (action === 'reject') {
+    db.prepare(`UPDATE requests SET status='rejected', triage_note=? WHERE id=?`).run(req.body.note || null, r.id);
+    if (r.reporter_type === 'tenant') notifications.residentUpdate(r.id, `This request was closed${req.body.note ? ': ' + req.body.note : '.'}`, 'Request closed');
+    return res.json({ ok: true });
+  }
+  if (action === 'duplicate') {
+    db.prepare(`UPDATE requests SET status='duplicate', triage_note=? WHERE id=?`).run(req.body.note || null, r.id);
+    if (r.reporter_type === 'tenant') notifications.residentUpdate(r.id, `This request was linked to an existing maintenance issue${req.body.note ? ': ' + req.body.note : '.'}`, 'Request linked');
+    return res.json({ ok: true });
+  }
+  if (action === 'info') {
+    db.prepare(`UPDATE requests SET status='info_needed', triage_note=? WHERE id=?`).run(req.body.note || null, r.id);
+    if (r.reporter_type === 'tenant') notifications.residentUpdate(r.id,
+      `The maintenance team needs more information: ${req.body.note || 'Please reply with additional details or photos.'}`, 'More information needed');
+    return res.json({ ok: true });
+  }
   if (action === 'convert') {
     const b = req.body;
+    if (b.assigned_user_id && !db.prepare(`SELECT 1 FROM users WHERE id=? AND organization_id=? AND role='technician' AND active=1`).get(b.assigned_user_id, req.oid)) return notFound(res);
+    if (b.assigned_vendor_id && !db.prepare('SELECT 1 FROM vendors WHERE id=? AND organization_id=? AND active=1').get(b.assigned_vendor_id, req.oid)) return notFound(res);
     const num = nextWONumber(req.oid);
     const status = (b.assigned_user_id || b.assigned_vendor_id) ? (b.scheduled_date ? 'scheduled' : 'assigned') : 'new';
     let instructions = r.access_instructions ? 'Access: ' + r.access_instructions : '';
@@ -802,6 +973,10 @@ router.post('/requests/:id/triage', MGMT_WRITE, (req, res) => {
       hist(req.oid, woId, req.user.id, 'assigned', 'Assigned during triage');
       notify(req.oid, b.assigned_user_id, 'assigned', 'New job assigned', `${num} — ${b.title || r.description.slice(0, 60)}`, '#/work-orders/' + woId);
     }
+    automation.resolveExceptions(req.oid, 'request', r.id);
+    if (r.reporter_type === 'tenant') notifications.residentUpdate(r.id,
+      `${num} was created from your request${b.scheduled_date ? ` and scheduled for ${b.scheduled_date}` : ''}.`, 'Repair created', woId);
+    notifications.emitWebhook(req.oid, 'request.converted', { request_id: r.id, work_order_id: woId, number: num, automated: false });
     return res.json({ id: woId, number: num });
   }
   res.status(400).json({ error: 'Unknown triage action' });
@@ -832,6 +1007,10 @@ router.post('/work-orders', MGMT_WRITE, (req, res) => {
   if (!b.title || !b.category) return res.status(400).json({ error: 'Title and category are required' });
   if (b.priority && !VALID_PRIORITIES.includes(b.priority)) return res.status(400).json({ error: 'Invalid priority' });
   if (!isDate(b.scheduled_date) || !isDate(b.due_date)) return res.status(400).json({ error: 'Dates must be YYYY-MM-DD' });
+  if (b.unit_id && !db.prepare('SELECT 1 FROM units WHERE id=? AND property_id=? AND organization_id=?').get(b.unit_id, prop.id, req.oid)) return res.status(400).json({ error: 'Unit must belong to the selected property' });
+  if (b.asset_id && !db.prepare('SELECT 1 FROM assets WHERE id=? AND property_id=? AND organization_id=?').get(b.asset_id, prop.id, req.oid)) return res.status(400).json({ error: 'Asset must belong to the selected property' });
+  if (b.assigned_user_id && !db.prepare(`SELECT 1 FROM users WHERE id=? AND organization_id=? AND role='technician' AND active=1`).get(b.assigned_user_id, req.oid)) return notFound(res);
+  if (b.assigned_vendor_id && !db.prepare('SELECT 1 FROM vendors WHERE id=? AND organization_id=? AND active=1').get(b.assigned_vendor_id, req.oid)) return notFound(res);
   const num = nextWONumber(req.oid);
   const status = (b.assigned_user_id || b.assigned_vendor_id) ? (b.scheduled_date ? 'scheduled' : 'assigned') : 'new';
   const id = db.prepare(`INSERT INTO work_orders (organization_id,number,property_id,unit_id,asset_id,category,title,description,instructions,
@@ -860,6 +1039,14 @@ router.get('/work-orders/:id', (req, res) => {
   const approvals = db.prepare('SELECT a.*, u.name AS requested_by_name, du.name AS decided_by_name FROM approvals a JOIN users u ON u.id=a.requested_by LEFT JOIN users du ON du.id=a.decided_by WHERE work_order_id=? ORDER BY a.created_at DESC').all(w.id);
   const quotes = db.prepare(`SELECT q.*, v.company AS vendor_company FROM vendor_quotes q JOIN vendors v ON v.id=q.vendor_id WHERE q.work_order_id=? ORDER BY q.created_at`).all(w.id);
   const activeTimer = time.find(t => !t.ended_at && t.user_id === req.user.id) || null;
+  const residentRequest = db.prepare(`SELECT id,tracking_token,resident_status,satisfaction_score,
+    resident_confirmed_at,reported_by,reporter_phone,reporter_email FROM requests WHERE work_order_id=?`).get(w.id) || null;
+  const residentMessages = residentRequest ? db.prepare(`SELECT id,direction,channel,body,attachment_url,created_at
+    FROM resident_messages WHERE request_id=? ORDER BY created_at`).all(residentRequest.id) : [];
+  const callbacks = db.prepare(`SELECT id,number,title,status,created_at FROM work_orders WHERE callback_of_id=? ORDER BY created_at`).all(w.id);
+  const original = w.callback_of_id ? db.prepare(`SELECT id,number,title,status FROM work_orders WHERE id=?`).get(w.callback_of_id) : null;
+  const dispatch = canRead(req.user) && !w.assigned_user_id && !w.assigned_vendor_id
+    ? automation.dispatchRecommendations(req.oid, w) : null;
   res.json({ wo: full, photos, comments, materials, expenses, time, history, approvals,
     quotes: req.user.role === 'vendor' ? quotes.filter(q => q.vendor_id === req.user.vendor_id) : quotes,
     active_timer: activeTimer,
@@ -867,7 +1054,8 @@ router.get('/work-orders/:id', (req, res) => {
     approval_t1: +setting(req.oid, 'approval_t1', 150),
     approval_t2: +setting(req.oid, 'approval_t2', 500),
     has_managers: hasManagers(req.oid),
-    supervisor: supervisorFor(req.oid) });
+    supervisor: supervisorFor(req.oid), resident_request: residentRequest, resident_messages: residentMessages, callbacks, callback_of: original,
+    dispatch });
 });
 
 router.patch('/work-orders/:id', (req, res) => {
@@ -875,6 +1063,13 @@ router.patch('/work-orders/:id', (req, res) => {
   const u = req.user;
   if (u.role === 'viewer') return res.status(403).json({ error: 'Viewers have read-only access' });
   const b = req.body || {};
+  let managementTouchRecorded = false;
+  const markManagementTouch = () => {
+    if (isMgmt(u) && !managementTouchRecorded) {
+      automation.recordManualTouch(w.id);
+      managementTouchRecorded = true;
+    }
+  };
 
   if (b.status && b.status !== w.status) {
     if (!VALID_STATUSES.includes(b.status)) return res.status(400).json({ error: 'Invalid status' });
@@ -898,8 +1093,8 @@ router.patch('/work-orders/:id', (req, res) => {
         const mins = Math.max(1, Math.round((Date.now() - new Date(t.started_at.replace(' ', 'T')).getTime()) / 60000));
         db.prepare('UPDATE time_logs SET ended_at=?, minutes=? WHERE id=?').run(now(), mins, t.id);
       }
-      db.prepare(`UPDATE work_orders SET status='completed', completed_at=?, completion_notes=COALESCE(?,completion_notes) WHERE id=?`)
-        .run(now(), b.completion_notes || null, w.id);
+      db.prepare(`UPDATE work_orders SET status='completed', completed_at=?, accepted_at=COALESCE(accepted_at,?), completion_notes=COALESCE(?,completion_notes) WHERE id=?`)
+        .run(now(), now(), b.completion_notes || null, w.id);
       if (w.pm_schedule_id) {
         const s = db.prepare('SELECT * FROM pm_schedules WHERE id=?').get(w.pm_schedule_id);
         if (s) db.prepare('UPDATE pm_schedules SET next_due=date(?, ?) WHERE id=?').run(now().slice(0, 10), `+${s.interval_days} days`, s.id);
@@ -907,17 +1102,27 @@ router.patch('/work-orders/:id', (req, res) => {
       if (w.asset_id) hist(req.oid, w.id, u.id, 'asset_history', 'Repair recorded to asset history');
       hist(req.oid, w.id, u.id, 'status_changed', 'Status changed', w.status, 'completed');
       notify(req.oid, mgmtIds(req.oid), 'completed', `Job completed: ${w.title}`, `${w.number} completed by ${u.name}.`, '#/work-orders/' + w.id);
+      markManagementTouch();
+      automation.onWorkOrderCompleted(w.id);
       return res.json({ ok: true });
     }
 
     if (b.status === 'in_progress' && !db.prepare('SELECT id FROM time_logs WHERE work_order_id=? AND user_id=? AND ended_at IS NULL').get(w.id, u.id)) {
       db.prepare('INSERT INTO time_logs (organization_id,work_order_id,user_id,kind,started_at) VALUES (?,?,?,?,?)').run(req.oid, w.id, u.id, 'work', now());
     }
-    db.prepare('UPDATE work_orders SET status=? WHERE id=?').run(b.status, w.id);
+    db.prepare(`UPDATE work_orders SET status=?,accepted_at=CASE WHEN ?='in_progress' THEN COALESCE(accepted_at,?) ELSE accepted_at END WHERE id=?`)
+      .run(b.status, b.status, now(), w.id);
     hist(req.oid, w.id, u.id, 'status_changed', 'Status changed', w.status, b.status);
+    if (b.status === 'in_progress') automation.resolveExceptions(req.oid, 'work_order', w.id, ['unaccepted']);
+    automation.onWorkOrderChanged(w.id, b.status);
+    markManagementTouch();
   }
 
   if (isMgmt(u)) {
+    if (b.unit_id && !db.prepare('SELECT 1 FROM units WHERE id=? AND property_id=? AND organization_id=?').get(b.unit_id, w.property_id, req.oid))
+      return res.status(400).json({ error: 'Unit must belong to this work order property' });
+    if (b.asset_id && !db.prepare('SELECT 1 FROM assets WHERE id=? AND property_id=? AND organization_id=?').get(b.asset_id, w.property_id, req.oid))
+      return res.status(400).json({ error: 'Asset must belong to this work order property' });
     const fields = ['title', 'description', 'instructions', 'category', 'scheduled_date', 'due_date', 'estimated_minutes', 'unit_id', 'asset_id'];
     const sets = [], vals = [];
     for (const f of fields) if (f in b) { sets.push(`${f}=?`); vals.push(b[f]); }
@@ -927,8 +1132,8 @@ router.patch('/work-orders/:id', (req, res) => {
       hist(req.oid, w.id, u.id, 'priority_changed', 'Priority changed', w.priority, b.priority);
     }
     if ('assigned_user_id' in b || 'assigned_vendor_id' in b) {
-      if (b.assigned_user_id && !db.prepare('SELECT 1 FROM users WHERE id=? AND organization_id=?').get(b.assigned_user_id, req.oid)) return notFound(res);
-      if (b.assigned_vendor_id && !db.prepare('SELECT 1 FROM vendors WHERE id=? AND organization_id=?').get(b.assigned_vendor_id, req.oid)) return notFound(res);
+      if (b.assigned_user_id && !db.prepare(`SELECT 1 FROM users WHERE id=? AND organization_id=? AND role='technician' AND active=1`).get(b.assigned_user_id, req.oid)) return notFound(res);
+      if (b.assigned_vendor_id && !db.prepare('SELECT 1 FROM vendors WHERE id=? AND organization_id=? AND active=1').get(b.assigned_vendor_id, req.oid)) return notFound(res);
       sets.push('assigned_user_id=?', 'assigned_vendor_id=?');
       vals.push(b.assigned_user_id || null, b.assigned_vendor_id || null);
       if (w.status === 'new') sets.push(`status='assigned'`);
@@ -936,7 +1141,14 @@ router.patch('/work-orders/:id', (req, res) => {
         String(w.assigned_user_id || w.assigned_vendor_id || ''), String(b.assigned_user_id || b.assigned_vendor_id || ''));
       if (b.assigned_user_id) notify(req.oid, b.assigned_user_id, 'assigned', 'Job assigned to you', `${w.number} — ${w.title}`, '#/work-orders/' + w.id);
     }
-    if (sets.length) { vals.push(w.id); db.prepare(`UPDATE work_orders SET ${sets.join(',')} WHERE id=?`).run(...vals); }
+    if (sets.length) {
+      vals.push(w.id); db.prepare(`UPDATE work_orders SET ${sets.join(',')} WHERE id=?`).run(...vals);
+      markManagementTouch();
+      if ('assigned_user_id' in b || 'assigned_vendor_id' in b) {
+        automation.resolveExceptions(req.oid, 'work_order', w.id, ['unassigned', 'dispatch_needed']);
+        automation.onWorkOrderChanged(w.id, b.scheduled_date ? 'scheduled' : 'assigned');
+      } else if ('scheduled_date' in b) automation.onWorkOrderChanged(w.id, 'scheduled');
+    }
   }
   res.json({ ok: true });
 });
@@ -946,12 +1158,27 @@ router.get('/work-orders/:id/completion-check', (req, res) => {
   res.json(completionCheck(req.oid, w));
 });
 
+router.post('/work-orders/:id/accept', (req, res) => {
+  const w = getWOOr404(req, res); if (!w) return;
+  const assignedTech = req.user.role === 'technician' && w.assigned_user_id === req.user.id;
+  const assignedVendor = req.user.role === 'vendor' && w.assigned_vendor_id === req.user.vendor_id;
+  if (!assignedTech && !assignedVendor) return res.status(403).json({ error: 'Only the assigned technician or vendor can accept this job' });
+  db.prepare(`UPDATE work_orders SET accepted_at=COALESCE(accepted_at,?),status=CASE WHEN status='new' THEN 'assigned' ELSE status END WHERE id=?`)
+    .run(now(), w.id);
+  hist(req.oid, w.id, req.user.id, 'assignment_accepted', `${req.user.name} accepted the assignment`);
+  automation.resolveExceptions(req.oid, 'work_order', w.id, ['unaccepted']);
+  automation.onWorkOrderChanged(w.id, 'assigned');
+  res.json({ ok: true, accepted_at: now() });
+});
+
 /* --- travel / arrival / work time events --- */
 router.post('/work-orders/:id/travel/start', (req, res) => {
   const w = getWOOr404(req, res); if (!w) return;
   if (db.prepare(`SELECT 1 FROM time_logs WHERE work_order_id=? AND user_id=? AND ended_at IS NULL`).get(w.id, req.user.id))
     return res.status(400).json({ error: 'A timer is already running on this job' });
   db.prepare('INSERT INTO time_logs (organization_id,work_order_id,user_id,kind,started_at) VALUES (?,?,?,?,?)').run(req.oid, w.id, req.user.id, 'travel', now());
+  db.prepare('UPDATE work_orders SET accepted_at=COALESCE(accepted_at,?) WHERE id=?').run(now(), w.id);
+  automation.resolveExceptions(req.oid, 'work_order', w.id, ['unaccepted']);
   hist(req.oid, w.id, req.user.id, 'travel_started', `${req.user.name} started travel`);
   res.json({ ok: true });
 });
@@ -979,8 +1206,10 @@ router.post('/work-orders/:id/time/start', (req, res) => {
   }
   db.prepare('INSERT INTO time_logs (organization_id,work_order_id,user_id,kind,started_at) VALUES (?,?,?,?,?)').run(req.oid, w.id, req.user.id, 'work', now());
   if (['assigned', 'scheduled', 'new'].includes(w.status)) {
-    db.prepare(`UPDATE work_orders SET status='in_progress' WHERE id=?`).run(w.id);
+    db.prepare(`UPDATE work_orders SET status='in_progress',accepted_at=COALESCE(accepted_at,?) WHERE id=?`).run(now(), w.id);
     hist(req.oid, w.id, req.user.id, 'status_changed', 'Job started', w.status, 'in_progress');
+    automation.resolveExceptions(req.oid, 'work_order', w.id, ['unaccepted']);
+    automation.onWorkOrderChanged(w.id, 'in_progress');
   } else hist(req.oid, w.id, req.user.id, 'job_started', 'Job started');
   res.json({ started_at: now() });
 });
@@ -1002,7 +1231,38 @@ router.post('/work-orders/:id/photos', upload.single('photo'), (req, res) => {
     VALUES (?,?,?,?,?,?,?,?,?)`)
     .run(req.oid, w.id, w.property_id, w.asset_id || null, kind, '/uploads/' + req.file.filename, req.body.caption || null, req.user.id, now()).lastInsertRowid;
   hist(req.oid, w.id, req.user.id, 'photo', `${kind[0].toUpperCase() + kind.slice(1)} photo uploaded`);
-  res.json({ id, url: '/uploads/' + req.file.filename, kind });
+  let analysisStatus = 'not_requested';
+  if (kind === 'receipt') {
+    analysisStatus = notifications.deliveryStatus().ai ? 'queued' : 'not_configured';
+    db.prepare('UPDATE photos SET ocr_status=? WHERE id=?').run(analysisStatus, id);
+    if (analysisStatus === 'queued') automation.enqueue('receipt_analyze', { photo_id: id }, new Date(), `receipt:${id}`, req.oid);
+  }
+  res.json({ id, url: '/uploads/' + req.file.filename, kind, analysis_status: analysisStatus });
+});
+
+router.post('/work-orders/:id/resident-messages', (req, res) => {
+  const w = getWOOr404(req, res); if (!w) return;
+  if (req.user.role === 'viewer') return res.status(403).json({ error: 'Viewers have read-only access' });
+  const residentRequest = db.prepare('SELECT id FROM requests WHERE work_order_id=? AND organization_id=?').get(w.id, req.oid);
+  if (!residentRequest) return res.status(404).json({ error: 'This work order is not linked to a resident request' });
+  const body = String((req.body || {}).body || '').trim().slice(0, 1200);
+  if (!body) return res.status(400).json({ error: 'Please enter a message' });
+  notifications.residentUpdate(residentRequest.id, body, `Update on ${w.number}`, w.id);
+  hist(req.oid, w.id, req.user.id, 'resident_message', `${req.user.name} sent a resident update`);
+  if (isMgmt(req.user)) automation.recordManualTouch(w.id);
+  automation.resolveExceptions(req.oid, 'work_order', w.id, ['resident_reply']);
+  res.json({ ok: true, created_at: now() });
+});
+
+router.post('/photos/:id/analyze', (req, res) => {
+  const p = db.prepare(`SELECT ph.*,w.assigned_user_id,w.assigned_vendor_id FROM photos ph
+    JOIN work_orders w ON w.id=ph.work_order_id WHERE ph.id=? AND ph.organization_id=?`).get(req.params.id, req.oid);
+  if (!p || !canSeeWO(req.user, p)) return notFound(res);
+  if (!notifications.deliveryStatus().ai) return res.status(409).json({ error: 'Photo analysis is optional. Set OPENAI_API_KEY to enable it.' });
+  const kind = p.kind === 'receipt' ? 'receipt_analyze' : 'photo_analyze';
+  db.prepare(`UPDATE photos SET ocr_status='queued' WHERE id=?`).run(p.id);
+  automation.enqueue(kind, { photo_id: p.id }, new Date(), `${kind}:${p.id}:${Date.now()}`, req.oid);
+  res.status(202).json({ ok: true, status: 'queued' });
 });
 router.post('/work-orders/:id/comments', (req, res) => {
   const w = getWOOr404(req, res); if (!w) return;
@@ -1026,14 +1286,21 @@ router.post('/work-orders/:id/materials', (req, res) => {
 });
 router.post('/work-orders/:id/expenses', (req, res) => {
   const w = getWOOr404(req, res); if (!w) return;
-  const { category, description, amount } = req.body || {};
+  const { category, description, amount, receipt_photo_id } = req.body || {};
   if (!isMoney(amount) || +amount <= 0) return res.status(400).json({ error: 'A valid amount is required' });
-  const id = db.prepare(`INSERT INTO expenses (organization_id,work_order_id,property_id,user_id,vendor_id,category,description,amount,incurred_on,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(req.oid, w.id, w.property_id, req.user.id, req.user.vendor_id || null, category || 'other', description || null, +amount, now().slice(0, 10), now()).lastInsertRowid;
+  if (receipt_photo_id && !db.prepare(`SELECT 1 FROM photos WHERE id=? AND work_order_id=? AND organization_id=?`).get(receipt_photo_id, w.id, req.oid)) return notFound(res);
+  const id = db.prepare(`INSERT INTO expenses (organization_id,work_order_id,property_id,user_id,vendor_id,category,description,amount,incurred_on,receipt_photo_id,source,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(req.oid, w.id, w.property_id, req.user.id, req.user.vendor_id || null, category || 'other', description || null,
+      +amount, now().slice(0, 10), receipt_photo_id || null, 'manual', now()).lastInsertRowid;
   hist(req.oid, w.id, req.user.id, 'expense', `Expense added: $${(+amount).toFixed(2)}${description ? ' — ' + description : ''}`);
   const t2 = +setting(req.oid, 'approval_t2', 500);
   if (+amount > t2 * 1.5) notify(req.oid, mgmtIds(req.oid), 'high_cost', 'Unusually high expense recorded', `$${(+amount).toLocaleString()} on ${w.number} — ${w.title}`, '#/work-orders/' + w.id);
+  const t1 = +setting(req.oid, 'approval_t1', 150);
+  const approved = db.prepare(`SELECT 1 FROM approvals WHERE work_order_id=? AND status='approved' AND amount>=?`).get(w.id, +amount);
+  if (+amount > t1 && !approved) automation.ensureException(req.oid, 'spend_policy', 'action',
+    `Expense above policy: $${(+amount).toFixed(2)}`, `${w.number} · ${description || category || 'expense'} · no matching prior approval`,
+    'work_order', w.id, now());
   res.json({ id });
 });
 
@@ -1066,6 +1333,7 @@ router.patch('/approvals/:id', MGMT_WRITE, (req, res) => {
   const w = db.prepare('SELECT * FROM work_orders WHERE id=?').get(a.work_order_id);
   if (decision === 'approved')
     db.prepare(`UPDATE work_orders SET status=CASE WHEN status='waiting_approval' THEN 'in_progress' ELSE status END WHERE id=?`).run(w.id);
+  if (decision === 'approved') automation.resolveExceptions(req.oid, 'work_order', w.id, ['approval_stale', 'spend_policy']);
   hist(req.oid, w.id, req.user.id, 'approval_' + decision,
     `$${(+a.amount).toLocaleString()} ${decision.replace('_', ' ')} by ${req.user.name}${req.body.note ? ' — ' + req.body.note : ''}`);
   const label = { approved: 'Approved', declined: 'Declined', info_requested: 'More information requested' }[decision];
@@ -1107,6 +1375,7 @@ router.post('/quotes/:id/submit', requireRole('vendor'), (req, res) => {
   const w = db.prepare('SELECT * FROM work_orders WHERE id=?').get(q.work_order_id);
   hist(req.oid, w.id, req.user.id, 'quote_submitted', `${db.prepare('SELECT company FROM vendors WHERE id=?').get(q.vendor_id).company} quoted $${(+price).toLocaleString()}`);
   notify(req.oid, mgmtIds(req.oid), 'quote', `Quote received: $${(+price).toLocaleString()}`, `${w.number} — ${w.title}`, '#/work-orders/' + w.id);
+  automation.resolveExceptions(req.oid, 'work_order', w.id, ['quote_stale']);
   res.json({ ok: true });
 });
 router.patch('/quotes/:id', MGMT_WRITE, (req, res) => {
@@ -1179,10 +1448,18 @@ router.post('/vendors', MGMT_WRITE, (req, res) => {
 router.patch('/vendors/:id', MGMT_WRITE, (req, res) => {
   const v = db.prepare('SELECT id FROM vendors WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
   if (!v) return notFound(res);
+  if ('insurance_expires' in req.body && !isDate(req.body.insurance_expires)) return res.status(400).json({ error: 'Dates must be YYYY-MM-DD' });
+  if ('hourly_rate' in req.body && req.body.hourly_rate != null && req.body.hourly_rate !== '' && (!Number.isFinite(+req.body.hourly_rate) || +req.body.hourly_rate < 0))
+    return res.status(400).json({ error: 'Hourly rate must be a positive number' });
   const fields = ['company', 'trade', 'contact_name', 'phone', 'email', 'service_area', 'insurance_expires', 'license_number', 'hourly_rate', 'emergency_available', 'notes', 'active'];
   const sets = [], vals = [];
-  for (const f of fields) if (f in req.body) { sets.push(`${f}=?`); vals.push(req.body[f]); }
-  if (sets.length) { vals.push(v.id); db.prepare(`UPDATE vendors SET ${sets.join(',')} WHERE id=?`).run(...vals); }
+  for (const f of fields) if (f in req.body) {
+    let value = req.body[f];
+    if (f === 'emergency_available' || f === 'active') value = value ? 1 : 0;
+    if (f === 'hourly_rate') value = value == null || value === '' ? null : +value;
+    sets.push(`${f}=?`); vals.push(value);
+  }
+  if (sets.length) { vals.push(v.id, req.oid); db.prepare(`UPDATE vendors SET ${sets.join(',')} WHERE id=? AND organization_id=?`).run(...vals); }
   res.json({ ok: true });
 });
 
@@ -1227,6 +1504,234 @@ router.post('/assets/:id/rvr', MGMT_WRITE, (req, res) => {
   db.prepare('INSERT INTO rvr_actions (organization_id,asset_id,action,user_id,note,created_at) VALUES (?,?,?,?,?,?)')
     .run(req.oid, a.id, action, req.user.id, req.body.note || null, now());
   res.json({ ok: true });
+});
+
+/* =====================================================================
+   AUTOPILOT / EXCEPTIONS / SMART DISPATCH
+===================================================================== */
+router.get('/automation/config', MGMT_READ, (req, res) => {
+  automation.ensureOrgDefaults(req.oid);
+  const keys = ['autopilot_enabled','auto_create_wo','auto_assign','auto_schedule','resident_updates',
+    'weekly_digest','vendor_fallback','auto_vendor_emergency'];
+  const settings = {};
+  keys.forEach(k => settings[k] = automation.enabled(req.oid, k, k !== 'auto_vendor_emergency'));
+  res.json({
+    settings,
+    policies: db.prepare(`SELECT * FROM automation_policies WHERE organization_id=? ORDER BY id`).all(req.oid)
+      .map(p => ({ ...p, trigger: JSON.parse(p.trigger_json || '{}'), actions: JSON.parse(p.actions_json || '[]') })),
+    slas: db.prepare(`SELECT * FROM sla_policies WHERE organization_id=? ORDER BY CASE priority WHEN 'emergency' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END`).all(req.oid),
+    delivery: notifications.deliveryStatus(), metrics: automation.metrics(req.oid)
+  });
+});
+
+router.put('/automation/config', MGMT_WRITE, (req, res) => {
+  const allowed = ['autopilot_enabled','auto_create_wo','auto_assign','auto_schedule','resident_updates',
+    'weekly_digest','vendor_fallback','auto_vendor_emergency'];
+  const b = req.body || {};
+  for (const key of allowed) if (key in (b.settings || b)) automation.setSetting(req.oid, key, (b.settings || b)[key] ? 1 : 0);
+  let wakeRequests = false;
+  for (const p of [].concat(b.policies || [])) {
+    if (!p.policy_key) continue;
+    db.prepare(`UPDATE automation_policies SET enabled=?,updated_at=? WHERE organization_id=? AND policy_key=?`)
+      .run(p.enabled ? 1 : 0, now(), req.oid, p.policy_key);
+    if (p.enabled) wakeRequests = true;
+  }
+  for (const s of [].concat(b.slas || [])) {
+    if (!VALID_PRIORITIES.includes(s.priority)) continue;
+    const ack = Math.max(5, Math.min(10080, +s.acknowledge_minutes || 60));
+    const start = Math.max(ack, Math.min(20160, +s.start_minutes || 240));
+    const resolve = Math.max(1, Math.min(720, +s.resolve_hours || 72));
+    db.prepare(`INSERT INTO sla_policies (organization_id,priority,acknowledge_minutes,start_minutes,resolve_hours,enabled)
+      VALUES (?,?,?,?,?,?) ON CONFLICT(organization_id,priority) DO UPDATE SET acknowledge_minutes=excluded.acknowledge_minutes,
+      start_minutes=excluded.start_minutes,resolve_hours=excluded.resolve_hours,enabled=excluded.enabled`)
+      .run(req.oid, s.priority, ack, start, resolve, s.enabled === false ? 0 : 1);
+  }
+  if ((b.settings || b).autopilot_enabled || (b.settings || b).auto_create_wo) wakeRequests = true;
+  if (wakeRequests) {
+    for (const request of db.prepare(`SELECT id FROM requests WHERE organization_id=? AND status IN ('open','info_needed') AND work_order_id IS NULL`).all(req.oid))
+      automation.onRequestCreated(request.id);
+  }
+  automation.logEvent(req.oid, 'policy', 'organization', req.oid, 'configuration_updated',
+    `${req.user.name} updated Autopilot policy`, 1, null, req.user.id);
+  res.json({ ok: true });
+});
+
+router.get('/automation/activity', MGMT_READ, (req, res) => {
+  const limit = Math.max(1, Math.min(200, +req.query.limit || 100));
+  res.json(db.prepare(`SELECT * FROM automation_events WHERE organization_id=? ORDER BY created_at DESC LIMIT ?`).all(req.oid, limit)
+    .map(e => ({ ...e, can_undo: !!e.undo_payload && e.status === 'applied' })));
+});
+
+router.post('/automation/activity/:id/undo', MGMT_WRITE, (req, res) => {
+  if (!automation.undoEvent(req.oid, req.params.id, req.user.id)) return res.status(409).json({ error: 'This action cannot be undone, or was already reversed' });
+  res.json({ ok: true });
+});
+
+router.post('/automation/run', MGMT_WRITE, async (req, res, next) => {
+  const action = (req.body || {}).action;
+  try {
+    if (action === 'jobs') return res.json({ processed: await automation.runDueJobs(50) });
+    if (action === 'sla_scan') return res.json({ exceptions_opened: automation.scanSlas() });
+    if (action === 'digest') return res.json(automation.createOwnerDigest(req.oid));
+    if (action === 'pm') return res.json({ generated: automation.generatePMWorkOrders() });
+    res.status(400).json({ error: 'Choose jobs, sla_scan, digest, or pm' });
+  } catch (error) { next(error); }
+});
+
+router.get('/exceptions', MGMT_READ, (req, res) => {
+  const status = ['open','snoozed','resolved'].includes(req.query.status) ? req.query.status : 'open';
+  res.json(db.prepare(`SELECT e.*,w.number,w.title work_order_title,r.description request_description
+    FROM exceptions e LEFT JOIN work_orders w ON e.source_type='work_order' AND w.id=e.source_id
+    LEFT JOIN requests r ON e.source_type='request' AND r.id=e.source_id
+    WHERE e.organization_id=? AND e.status=? ORDER BY CASE e.severity WHEN 'critical' THEN 0 WHEN 'action' THEN 1 ELSE 2 END,e.created_at`).all(req.oid, status));
+});
+
+router.patch('/exceptions/:id', MGMT_WRITE, (req, res) => {
+  const x = db.prepare('SELECT * FROM exceptions WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!x) return notFound(res);
+  const action = req.body.action;
+  if (action === 'resolve') db.prepare(`UPDATE exceptions SET status='resolved',resolved_at=? WHERE id=?`).run(now(), x.id);
+  else if (action === 'reopen') db.prepare(`UPDATE exceptions SET status='open',resolved_at=NULL,snoozed_until=NULL WHERE id=?`).run(x.id);
+  else if (action === 'snooze') {
+    const hours = Math.max(1, Math.min(720, +req.body.hours || 24));
+    db.prepare(`UPDATE exceptions SET status='snoozed',snoozed_until=datetime('now',?) WHERE id=?`).run(`+${hours} hours`, x.id);
+  } else return res.status(400).json({ error: 'Choose resolve, snooze, or reopen' });
+  res.json({ ok: true });
+});
+
+router.get('/dispatch/recommend/:id', MGMT_READ, (req, res) => {
+  const w = db.prepare('SELECT * FROM work_orders WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!w) return notFound(res);
+  res.json(automation.dispatchRecommendations(req.oid, w));
+});
+
+router.get('/digests', MGMT_READ, (req, res) => {
+  res.json(db.prepare(`SELECT * FROM owner_digests WHERE organization_id=? ORDER BY period_end DESC LIMIT 20`).all(req.oid)
+    .map(d => ({ ...d, summary: JSON.parse(d.summary_json) })));
+});
+
+/* =====================================================================
+   INTEGRATIONS — CSV bridge + signed generic webhooks
+===================================================================== */
+function parseCsv(input) {
+  const rows = []; let row = [], cell = '', quoted = false;
+  const text = String(input || '').replace(/^\uFEFF/, '');
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted && c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+    else if (c === '"') quoted = !quoted;
+    else if (c === ',' && !quoted) { row.push(cell); cell = ''; }
+    else if ((c === '\n' || c === '\r') && !quoted) {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(cell); cell = '';
+      if (row.some(v => v.trim())) rows.push(row); row = [];
+    } else cell += c;
+  }
+  row.push(cell); if (row.some(v => v.trim())) rows.push(row);
+  if (!rows.length) return [];
+  const headers = rows.shift().map(h => h.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, ''));
+  return rows.map(values => Object.fromEntries(headers.map((h, i) => [h, (values[i] || '').trim()])));
+}
+const csvCell = value => {
+  const s = value == null ? '' : String(value);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+const csvText = (headers, rows) => [headers.join(','), ...rows.map(r => headers.map(h => csvCell(r[h])).join(','))].join('\r\n');
+
+router.get('/integrations', MGMT_READ, (req, res) => {
+  res.json({
+    delivery: notifications.deliveryStatus(),
+    webhooks: db.prepare(`SELECT id,name,direction,url,event_types,inbound_token,active,created_at,
+      CASE WHEN secret IS NULL OR secret='' THEN 0 ELSE 1 END has_secret FROM webhook_endpoints WHERE organization_id=? ORDER BY id`).all(req.oid),
+    runs: db.prepare(`SELECT * FROM integration_runs WHERE organization_id=? ORDER BY created_at DESC LIMIT 30`).all(req.oid),
+    outbox: db.prepare(`SELECT channel,status,COUNT(*) count FROM outbox WHERE organization_id=? GROUP BY channel,status`).all(req.oid)
+  });
+});
+
+router.post('/integrations/webhooks', MGMT_WRITE, (req, res) => {
+  const b = req.body || {};
+  const direction = b.direction === 'inbound' ? 'inbound' : 'outbound';
+  if (!b.name) return res.status(400).json({ error: 'Name is required' });
+  if (direction === 'outbound' && !notifications.publicWebhookUrl(b.url)) return res.status(400).json({ error: 'Enter a public HTTP(S) webhook URL' });
+  const secret = b.secret || crypto.randomBytes(24).toString('base64url');
+  const inboundToken = direction === 'inbound' ? crypto.randomBytes(24).toString('base64url') : null;
+  const events = Array.isArray(b.event_types) ? JSON.stringify(b.event_types.slice(0, 30)) : (b.event_types || '*');
+  const id = db.prepare(`INSERT INTO webhook_endpoints
+    (organization_id,name,direction,url,secret,event_types,inbound_token,created_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run(req.oid, String(b.name).slice(0, 100), direction, direction === 'outbound' ? b.url : null,
+      secret, events, inboundToken, now()).lastInsertRowid;
+  res.json({ id, direction, secret: direction === 'outbound' ? secret : undefined, inbound_token: inboundToken,
+    inbound_path: inboundToken ? '/api/integrations/inbound/' + inboundToken : undefined });
+});
+
+router.patch('/integrations/webhooks/:id', MGMT_WRITE, (req, res) => {
+  const endpoint = db.prepare('SELECT * FROM webhook_endpoints WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!endpoint) return notFound(res);
+  if ('url' in req.body && endpoint.direction === 'outbound' && !notifications.publicWebhookUrl(req.body.url)) return res.status(400).json({ error: 'Enter a public HTTP(S) webhook URL' });
+  db.prepare(`UPDATE webhook_endpoints SET name=COALESCE(?,name),url=COALESCE(?,url),event_types=COALESCE(?,event_types),active=COALESCE(?,active) WHERE id=?`)
+    .run(req.body.name || null, req.body.url || null, req.body.event_types ? (Array.isArray(req.body.event_types) ? JSON.stringify(req.body.event_types) : req.body.event_types) : null,
+      'active' in req.body ? (req.body.active ? 1 : 0) : null, endpoint.id);
+  res.json({ ok: true });
+});
+
+router.post('/integrations/webhooks/:id/test', MGMT_WRITE, (req, res) => {
+  const endpoint = db.prepare(`SELECT * FROM webhook_endpoints WHERE id=? AND organization_id=? AND direction='outbound'`).get(req.params.id, req.oid);
+  if (!endpoint) return notFound(res);
+  notifications.queue(req.oid, 'webhook', endpoint.url, 'integration.test', null, null,
+    { event: 'integration.test', data: { organization_id: req.oid, message: 'Steadhold webhook test' }, occurred_at: new Date().toISOString(), secret: endpoint.secret || '' });
+  automation.enqueue('outbox_flush', {}, new Date(), `webhook-test:${endpoint.id}:${Date.now()}`);
+  res.status(202).json({ ok: true, status: 'queued' });
+});
+
+router.post('/integrations/import/properties', MGMT_WRITE, (req, res) => {
+  const rows = parseCsv((req.body || {}).csv);
+  if (!rows.length) return res.status(400).json({ error: 'CSV is empty. Include property_name and address headers.' });
+  let properties = 0, units = 0, skipped = 0;
+  db.transaction(() => {
+    for (const row of rows.slice(0, 5000)) {
+      const name = row.property_name || row.name, address = row.address;
+      if (!name || !address) { skipped++; continue; }
+      let property = db.prepare(`SELECT id FROM properties WHERE organization_id=? AND lower(address)=lower(?)`).get(req.oid, address);
+      if (!property) {
+        const id = db.prepare(`INSERT INTO properties
+          (organization_id,name,address,city,state,zip,type,year_built,intake_token) VALUES (?,?,?,?,?,?,?,?,?)`)
+          .run(req.oid, name, address, row.city || null, row.state || null, row.zip || null, row.type || null,
+            +row.year_built || null, crypto.randomBytes(12).toString('hex')).lastInsertRowid;
+        property = { id }; properties++;
+      }
+      const label = row.unit_label || row.unit;
+      if (label && !db.prepare(`SELECT 1 FROM units WHERE property_id=? AND lower(label)=lower(?)`).get(property.id, label)) {
+        const occupied = !['false', '0', 'no', 'vacant'].includes(String(row.occupied == null || row.occupied === '' ? 'true' : row.occupied).toLowerCase());
+        db.prepare(`INSERT INTO units (organization_id,property_id,label,beds,baths,sqft,occupied) VALUES (?,?,?,?,?,?,?)`)
+          .run(req.oid, property.id, label, +row.beds || null, +row.baths || null, +row.sqft || null,
+            occupied ? 1 : 0); units++;
+      }
+    }
+  })();
+  const detail = `${properties} properties, ${units} units, ${skipped} rows skipped`;
+  db.prepare(`INSERT INTO integration_runs (organization_id,provider,direction,entity,records,status,detail,created_at)
+    VALUES (?,'csv','inbound','properties',?,'success',?,?)`).run(req.oid, rows.length - skipped, detail, now());
+  res.json({ rows: rows.length, properties_created: properties, units_created: units, skipped });
+});
+
+router.get('/integrations/export/accounting.csv', MGMT_READ, (req, res) => {
+  const headers = ['incurred_on','property','work_order','category','description','amount','vendor','technician','source','external_id'];
+  const rows = db.prepare(`SELECT e.incurred_on,p.name property,w.number work_order,e.category,e.description,e.amount,
+      v.company vendor,u.name technician,e.source,e.external_id FROM expenses e JOIN properties p ON p.id=e.property_id
+    LEFT JOIN work_orders w ON w.id=e.work_order_id LEFT JOIN vendors v ON v.id=e.vendor_id LEFT JOIN users u ON u.id=e.user_id
+    WHERE e.organization_id=? ORDER BY e.incurred_on,e.id`).all(req.oid);
+  res.type('text/csv').set('Content-Disposition', 'attachment; filename="steadhold-accounting.csv"').send(csvText(headers, rows));
+});
+
+router.get('/integrations/export/work-orders.csv', MGMT_READ, (req, res) => {
+  const headers = ['number','property','unit','category','title','priority','status','assigned_to','scheduled_date','due_date','completed_at','total_cost','source'];
+  const rows = db.prepare(`${WO_SELECT} WHERE w.organization_id=? ORDER BY w.created_at`).all(req.oid).map(w => ({
+    number: w.number, property: w.property_name, unit: w.unit_label, category: w.category, title: w.title,
+    priority: w.priority, status: w.status, assigned_to: w.tech_name || w.vendor_company,
+    scheduled_date: w.scheduled_date, due_date: w.due_date, completed_at: w.completed_at,
+    total_cost: (+w.total_cost).toFixed(2), source: w.source
+  }));
+  res.type('text/csv').set('Content-Disposition', 'attachment; filename="steadhold-work-orders.csv"').send(csvText(headers, rows));
 });
 
 /* =====================================================================

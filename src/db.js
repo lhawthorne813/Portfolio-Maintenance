@@ -1,4 +1,4 @@
-// db.js — SQLite connection + schema + V2 migration (idempotent, preserves data)
+// db.js — SQLite connection + V2/V3 migrations (idempotent, preserves data)
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
@@ -472,17 +472,11 @@ function migrateV2() {
     for (const p of untokened) setTok.run(crypto.randomBytes(9).toString('hex'), p.id);
   }
 
-  // Backfill: assign all pre-V2 records to the default demo organization
-  const anyUser = db.prepare('SELECT COUNT(*) c FROM users').get().c;
-  const unscoped = anyUser && db.prepare('SELECT COUNT(*) c FROM users WHERE organization_id IS NULL').get().c;
-  if (unscoped) {
-    const existing = db.prepare(`SELECT id FROM organizations WHERE name='Pine Ridge Residential'`).get();
-    const orgId = existing ? existing.id : db.prepare(`INSERT INTO organizations (name,owner_name,email,approx_units,primary_market)
-      VALUES ('Pine Ridge Residential','Dan Whitfield','owner@demo.com',40,'Jacksonville, FL')`).run().lastInsertRowid;
-    for (const t of orgTables) db.prepare(`UPDATE ${t} SET organization_id=? WHERE organization_id IS NULL`).run(orgId);
-    db.prepare(`UPDATE settings SET organization_id=? WHERE organization_id IS NULL`).run(orgId);
-    MIGRATION_LOG.push(`backfill: existing records assigned to organization #${orgId} (Pine Ridge Residential)`);
-  }
+  // Backfill: assign all pre-V2 records to the default demo organization. The helper
+  // also repairs numbers created by older fresh-install bootstraps before applying
+  // the organization id, avoiding a UNIQUE(organization_id, number) collision.
+  if (ensureDefaultOrganization(orgTables))
+    MIGRATION_LOG.push('backfill: existing records assigned to Pine Ridge Residential');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_wo_org ON work_orders(organization_id, status);
@@ -499,6 +493,200 @@ function migrateV2() {
 
   if (MIGRATION_LOG.length) console.log('V2 migration:\n  ' + MIGRATION_LOG.join('\n  '));
 }
-migrateV2();
 
+function ensureDefaultOrganization(orgTables) {
+  const tables = orgTables || ['users','vendors','properties','requests','work_orders','assets','expenses',
+    'pm_schedules','approvals','notifications','inspections','photos','comments','materials','time_logs','wo_history','units'];
+  const anyUser = db.prepare('SELECT COUNT(*) c FROM users').get().c;
+  if (!anyUser) return null;
+  const ensurePublicTokens = () => {
+    const crypto = require('crypto');
+    if (hasColumn('properties', 'intake_token')) {
+      const set = db.prepare('UPDATE properties SET intake_token=? WHERE id=?');
+      db.prepare(`SELECT id FROM properties WHERE intake_token IS NULL OR intake_token=''`).all()
+        .forEach(r => set.run(crypto.randomBytes(12).toString('hex'), r.id));
+    }
+    if (hasColumn('requests', 'tracking_token')) {
+      const set = db.prepare('UPDATE requests SET tracking_token=? WHERE id=?');
+      db.prepare(`SELECT id FROM requests WHERE tracking_token IS NULL OR tracking_token=''`).all()
+        .forEach(r => set.run(crypto.randomBytes(24).toString('base64url'), r.id));
+    }
+  };
+  const needsScope = tables.some(t => hasTable(t) && hasColumn(t, 'organization_id') &&
+    db.prepare(`SELECT 1 FROM ${t} WHERE organization_id IS NULL LIMIT 1`).get());
+  if (!needsScope && !db.prepare('SELECT 1 FROM settings WHERE organization_id IS NULL LIMIT 1').get()) {
+    ensurePublicTokens();
+    return null;
+  }
+  const existing = db.prepare(`SELECT id FROM organizations WHERE name='Pine Ridge Residential'`).get();
+  const orgId = existing ? existing.id : db.prepare(`INSERT INTO organizations (name,owner_name,email,approx_units,primary_market)
+    VALUES ('Pine Ridge Residential','Dan Whitfield','owner@demo.com',40,'Jacksonville, FL')`).run().lastInsertRowid;
+
+  db.transaction(() => {
+    // NULL values are exempt from SQLite composite uniqueness, so old bootstraps
+    // could create several WO-1001 rows. Give every unscoped row a stable unique
+    // number before assigning the shared organization id.
+    const unscopedWos = db.prepare('SELECT id FROM work_orders WHERE organization_id IS NULL ORDER BY id').all();
+    if (unscopedWos.length) {
+      const max = db.prepare(`SELECT MAX(CAST(substr(number,4) AS INTEGER)) n FROM work_orders
+        WHERE organization_id=? AND number GLOB 'WO-[0-9]*'`).get(orgId).n || 1000;
+      const temp = db.prepare('UPDATE work_orders SET number=? WHERE id=?');
+      unscopedWos.forEach(w => temp.run(`BOOT-${w.id}-${Date.now()}`, w.id));
+      unscopedWos.forEach((w, i) => temp.run(`WO-${max + i + 1}`, w.id));
+    }
+    for (const t of tables) {
+      if (hasTable(t) && hasColumn(t, 'organization_id'))
+        db.prepare(`UPDATE ${t} SET organization_id=? WHERE organization_id IS NULL`).run(orgId);
+    }
+    db.prepare(`UPDATE settings SET organization_id=? WHERE organization_id IS NULL`).run(orgId);
+  })();
+  ensurePublicTokens();
+  return orgId;
+}
+
+/* ---------------- V3 automation migration ----------------
+   Deterministic rules authorize work. Optional AI only extracts or interprets
+   evidence; every automated change is recorded and reversible where practical. */
+function migrateV3() {
+  const logStart = MIGRATION_LOG.length;
+  const add = (table, columns) => {
+    for (const [name, type] of Object.entries(columns)) {
+      if (!hasColumn(table, name)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+        MIGRATION_LOG.push(`${table}: added ${name}`);
+      }
+    }
+  };
+
+  add('requests', {
+    tracking_token: 'TEXT', playbook: 'TEXT', triage_confidence: 'REAL',
+    automation_state: 'TEXT', resident_status: `TEXT DEFAULT 'received'`,
+    last_resident_message_at: 'TEXT', resident_confirmed_at: 'TEXT',
+    satisfaction_score: 'INTEGER', reopened_at: 'TEXT', sla_due_at: 'TEXT'
+  });
+  add('work_orders', {
+    accepted_at: 'TEXT', auto_assigned: 'INTEGER NOT NULL DEFAULT 0',
+    sla_due_at: 'TEXT', resident_confirmed_at: 'TEXT', callback_of_id: 'INTEGER',
+    last_resident_update_at: 'TEXT', management_touches: 'INTEGER NOT NULL DEFAULT 1'
+  });
+  add('photos', { ai_analysis: 'TEXT', ocr_status: `TEXT DEFAULT 'not_requested'` });
+  add('expenses', { source: `TEXT DEFAULT 'manual'`, external_id: 'TEXT' });
+
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS sessions (
+    sid TEXT PRIMARY KEY, sess TEXT NOT NULL, expire INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS durable_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER REFERENCES organizations(id),
+    kind TEXT NOT NULL, payload TEXT, run_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
+    dedupe_key TEXT UNIQUE, locked_at TEXT, completed_at TEXT, last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER REFERENCES organizations(id),
+    channel TEXT NOT NULL, recipient TEXT NOT NULL, subject TEXT, body TEXT,
+    link TEXT, payload TEXT, status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0, run_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT, sent_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS automation_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    event_type TEXT NOT NULL, source_type TEXT, source_id INTEGER,
+    action TEXT NOT NULL, reason TEXT, confidence REAL, undo_payload TEXT,
+    status TEXT NOT NULL DEFAULT 'applied', actor_user_id INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), undone_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS exceptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    kind TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'action',
+    title TEXT NOT NULL, detail TEXT, source_type TEXT, source_id INTEGER,
+    owner_user_id INTEGER REFERENCES users(id), due_at TEXT,
+    status TEXT NOT NULL DEFAULT 'open', snoozed_until TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), resolved_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS resident_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    request_id INTEGER NOT NULL REFERENCES requests(id),
+    work_order_id INTEGER REFERENCES work_orders(id),
+    direction TEXT NOT NULL, channel TEXT NOT NULL DEFAULT 'portal',
+    body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS technician_profiles (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id),
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    skills TEXT NOT NULL DEFAULT '[]', service_area TEXT,
+    work_days TEXT NOT NULL DEFAULT '1,2,3,4,5', shift_start TEXT DEFAULT '08:00',
+    shift_end TEXT DEFAULT '17:00', max_daily_minutes INTEGER DEFAULT 480,
+    auto_assign INTEGER NOT NULL DEFAULT 1, emergency_on_call INTEGER NOT NULL DEFAULT 0,
+    latitude REAL, longitude REAL, updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS automation_policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    policy_key TEXT NOT NULL, name TEXT NOT NULL, trigger_json TEXT,
+    actions_json TEXT, risk_level TEXT NOT NULL DEFAULT 'low',
+    enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(organization_id, policy_key)
+  );
+  CREATE TABLE IF NOT EXISTS sla_policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    priority TEXT NOT NULL, acknowledge_minutes INTEGER NOT NULL,
+    start_minutes INTEGER NOT NULL, resolve_hours INTEGER NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1, UNIQUE(organization_id, priority)
+  );
+  CREATE TABLE IF NOT EXISTS webhook_endpoints (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    name TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'outbound',
+    url TEXT, secret TEXT, event_types TEXT NOT NULL DEFAULT '*',
+    inbound_token TEXT UNIQUE, active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS integration_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    provider TEXT NOT NULL, direction TEXT NOT NULL, entity TEXT NOT NULL,
+    records INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL,
+    detail TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS owner_digests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    organization_id INTEGER NOT NULL REFERENCES organizations(id),
+    period_start TEXT NOT NULL, period_end TEXT NOT NULL, summary_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_sessions_expire ON sessions(expire);
+  CREATE INDEX IF NOT EXISTS idx_jobs_due ON durable_jobs(status, run_at);
+  CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(status, run_at);
+  CREATE INDEX IF NOT EXISTS idx_auto_org ON automation_events(organization_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_exceptions_org ON exceptions(organization_id, status, created_at);
+  CREATE INDEX IF NOT EXISTS idx_resident_request ON resident_messages(request_id, created_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_tracking ON requests(tracking_token) WHERE tracking_token IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_wo_callback ON work_orders(callback_of_id);
+  `);
+
+  // Added after the table declaration so this also upgrades early V3 databases
+  // created before resident follow-up evidence was introduced.
+  add('resident_messages', { attachment_url: 'TEXT' });
+
+  const crypto = require('crypto');
+  const missingTokens = db.prepare('SELECT id FROM requests WHERE tracking_token IS NULL').all();
+  const tokenStmt = db.prepare('UPDATE requests SET tracking_token=? WHERE id=?');
+  missingTokens.forEach(r => tokenStmt.run(crypto.randomBytes(24).toString('base64url'), r.id));
+  const changes = MIGRATION_LOG.slice(logStart);
+  if (changes.length) console.log('V3 migration:\n  ' + changes.join('\n  '));
+}
+migrateV2();
+migrateV3();
+
+db.ensureDefaultOrganization = ensureDefaultOrganization;
+db.hasColumn = hasColumn;
 module.exports = db;

@@ -14,7 +14,9 @@ function seed(force = false) {
   const has = db.prepare('SELECT COUNT(*) c FROM users').get().c;
   if (has && !force) return false;
   if (force) {
-    const tables = ['inspections','notifications','approvals','pm_schedules','time_logs','expenses','materials',
+    const tables = ['owner_digests','integration_runs','webhook_endpoints','sla_policies','automation_policies',
+      'technician_profiles','resident_messages','exceptions','automation_events','outbox','durable_jobs','sessions',
+      'inspections','notifications','approvals','pm_schedules','time_logs','expenses','materials',
       'comments','photos','wo_history','work_orders','requests','assets','units','properties','users','vendors','settings','vendor_quotes','completion_requirements','invites','notification_prefs','rvr_actions','organizations'];
     db.pragma('foreign_keys = OFF');
     for (const t of tables) db.exec(`DELETE FROM ${t}; DELETE FROM sqlite_sequence WHERE name='${t}';`);
