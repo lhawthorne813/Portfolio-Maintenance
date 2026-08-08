@@ -497,3 +497,6 @@ html,body{overflow-x:hidden}
 .conn-bar.sync{background:var(--amber);color:var(--ink);cursor:pointer}
 @media(min-width:900px){.conn-bar{bottom:0}}
 .banner.off{background:var(--ink);color:#fff;display:flex;align-items:center;gap:8px}
+
+/* Direct line to the person running the job — owner or manager, whoever it is */
+.contact-card{border-left:4px solid var(--pine)}
