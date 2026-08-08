@@ -746,7 +746,13 @@ async function renderWODetail(id) {
       <div class="card-title">Job actions</div>
       ${!workActive && !travelActive && !arrivedAlready && ['assigned', 'scheduled', 'new', 'waiting_vendor'].includes(w.status) ? `<button class="btn pri full big" onclick="travelStart()">🚗 START TRAVEL</button>` : ''}
       ${travelActive ? `<button class="btn pri full big" onclick="arrived()">📍 ARRIVED ON SITE</button>` : ''}
-      ${!workActive && !travelActive ? `<button class="btn ${arrivedAlready ? 'pri' : 'sec'} full big" style="margin-top:8px" onclick="woStart()">▶ START WORK</button>` : ''}
+      ${!workActive && !travelActive ? (() => {
+        const needsBefore = d.completion.items.some(i => i.key === 'before_photo' && i.required && !i.done);
+        return needsBefore
+          ? `<label class="btn sec full big" style="margin-top:8px;display:block;text-align:center;cursor:pointer">📷 TAKE BEFORE PHOTO TO START<input type="file" accept="image/*" capture="environment" hidden onchange="uploadPhoto(this,'before')"></label>
+             <div class="s" style="text-align:center;margin-top:6px;color:var(--muted)">A before photo is required for ${esc(w.category)} jobs.</div>`
+          : `<button class="btn ${arrivedAlready ? 'pri' : 'sec'} full big" style="margin-top:8px" onclick="woStart()">▶ START WORK</button>`;
+      })() : ''}
       ${workActive ? `
         <div class="timer-live">⏱ Working — started ${fmtTime(workActive.started_at)}</div>
         <button class="btn pri full big" onclick="openComplete()">✓ COMPLETE JOB</button>
@@ -845,7 +851,15 @@ async function renderWODetail(id) {
 /* --- WO detail action helpers --- */
 window.travelStart = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/travel/start`, {}); toast('Travel started'); render(); } catch (e) { toast(e.message); } };
 window.arrived = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/arrived`, {}); toast('Arrival recorded'); render(); } catch (e) { toast(e.message); } };
-window.woStart = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/time/start`, {}); toast('Work timer started'); render(); } catch (e) { toast(e.message); } };
+window.woStart = async (override) => {
+  try { await POST(`/work-orders/${CURRENT_WO.wo.id}/time/start`, override ? { override: true, override_note: override } : {}); toast('Work timer started'); render(); }
+  catch (e) {
+    if (e.data && e.data.needs === 'before_photo' && canWrite()) {
+      confirmModal('Start without a before photo?', 'A before photo is required for this category. Starting anyway will be logged.',
+        () => { closeModal(); woStart('Manager started without before photo'); }, 'Start anyway');
+    } else toast(e.message);
+  }
+};
 window.woStatus = async s => { try { await PATCH(`/work-orders/${CURRENT_WO.wo.id}`, { status: s }); render(); } catch (e) { toast(e.message); } };
 
 window.openComplete = () => {
@@ -1183,7 +1197,10 @@ async function renderPropertyDetail(id, qs) {
       </div>` : ''}
       <div class="card">
         <div class="card-title">Units (${d.units.length}) ${canWrite() ? `<button class="more" onclick="addUnit(${p.id})">+ Add ›</button>` : ''}</div>
-        ${d.units.map(u => `<div class="list-item"><div class="body"><div class="t">Unit ${esc(u.label)}</div><div class="s">${u.beds || '—'} bd · ${u.baths || '—'} ba${u.sqft ? ' · ' + u.sqft + ' sqft' : ''}</div></div><div class="end">${u.occupied ? '<span class="chip completed">Occupied</span>' : '<span class="chip cancelled">Vacant</span>'}</div></div>`).join('') || '<div class="s">No units recorded.</div>'}
+        ${d.units.map(u => `<div class="list-item"><div class="body"><div class="t">Unit ${esc(u.label)}</div><div class="s">${u.beds || '—'} bd · ${u.baths || '—'} ba${u.sqft ? ' · ' + u.sqft + ' sqft' : ''}</div></div>
+          <div class="end">${canWrite()
+            ? `<button class="chip ${u.occupied ? 'completed' : 'cancelled'}" style="border:none;cursor:pointer" onclick="toggleOccupied(${u.id},${u.occupied ? 0 : 1})">${u.occupied ? 'Occupied' : 'Vacant'}</button>`
+            : (u.occupied ? '<span class="chip completed">Occupied</span>' : '<span class="chip cancelled">Vacant</span>')}</div></div>`).join('') || '<div class="s">No units recorded.</div>'}
       </div>
       <div class="card">
         <div class="card-title">Open work orders (${d.open_wos.length}) ${canWrite() ? `<button class="more" onclick='openWOForm({property_id:${p.id}})'>+ New ›</button>` : ''}</div>
@@ -1255,11 +1272,15 @@ window.addUnit = pid => {
     <div class="field"><label>Sq ft</label><input id="u-sqft" type="number"></div></div>
     <div class="row2"><div class="field"><label>Beds</label><input id="u-beds" type="number"></div>
     <div class="field"><label>Baths</label><input id="u-baths" type="number" step="0.5"></div></div>
-    <button class="btn pri full" id="u-go">Add unit</button>`);
+    <div class="tglrow"><span>Currently occupied</span><input type="checkbox" class="tgl" id="u-occ"></div>
+    <button class="btn pri full" style="margin-top:10px" id="u-go">Add unit</button>`);
   document.getElementById('u-go').onclick = async () => {
-    try { await POST(`/properties/${pid}/units`, { label: fv('u-label'), beds: fv('u-beds'), baths: fv('u-baths'), sqft: fv('u-sqft') }); await bootMeta(); closeModal(); render(); }
+    try { await POST(`/properties/${pid}/units`, { label: fv('u-label'), beds: fv('u-beds'), baths: fv('u-baths'), sqft: fv('u-sqft'), occupied: fchk('u-occ') }); await bootMeta(); closeModal(); render(); }
     catch (e) { toast(e.message); }
   };
+};
+window.toggleOccupied = async (uid, occ) => {
+  try { await PATCH('/units/' + uid, { occupied: occ }); render(); } catch (e) { toast(e.message); }
 };
 window.addAsset = pid => {
   modal(`<h3>Add asset</h3>
