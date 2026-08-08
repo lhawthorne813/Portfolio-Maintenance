@@ -6,15 +6,11 @@ let ME = null, META = { properties: [], units: [], technicians: [], vendors: [],
 const $app = document.getElementById('app');
 
 async function api(path, opts = {}) {
-  const o = { headers: {}, credentials: 'same-origin', ...opts };
-  if (o.body && !(o.body instanceof FormData)) { o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(o.body); }
-  const r = await fetch('/api' + path, o);
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(data.error || 'Request failed'); e.data = data; throw e; }
-  return data;
+  return window.Offline.request(path, opts);   // read cache + write queue live here
 }
 const GET = p => api(p);
 const POST = (p, b) => api(p, { method: 'POST', body: b });
+const isQueued = r => r && r.__queued;
 const PATCH = (p, b) => api(p, { method: 'PATCH', body: b });
 const PUT = (p, b) => api(p, { method: 'PUT', body: b });
 
@@ -37,6 +33,28 @@ function propGradient(id) {
 function healthRing(score) {
   const cls = score >= 80 ? 'h-good' : score >= 60 ? 'h-ok' : 'h-bad';
   return `<span class="health"><span class="ring ${cls}">${score}</span></span>`;
+}
+function paintConnState() {
+  let el = document.getElementById('conn-bar');
+  const O = window.Offline;
+  const show = !O.online || O.pending > 0 || O.syncing;
+  if (!show) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'conn-bar';
+    document.body.appendChild(el);
+  }
+  if (!O.online) {
+    el.className = 'conn-bar off';
+    el.innerHTML = `<b>Working offline</b>${O.pending ? ` · ${O.pending} change${O.pending > 1 ? 's' : ''} waiting to sync` : ' · your work is being saved on this device'}`;
+  } else if (O.syncing) {
+    el.className = 'conn-bar sync';
+    el.innerHTML = `<b>Syncing…</b>${O.pending ? ` ${O.pending} left` : ''}`;
+  } else {
+    el.className = 'conn-bar sync';
+    el.innerHTML = `<b>${O.pending} change${O.pending > 1 ? 's' : ''} waiting to sync</b> · tap to retry`;
+    el.onclick = () => window.Offline.sync();
+  }
 }
 function toast(msg) { const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg; document.body.appendChild(t); setTimeout(() => t.remove(), 2600); }
 function modal(html) {
@@ -62,14 +80,51 @@ const isMgmt = () => ME && (ME.role === 'owner' || ME.role === 'manager');
 const canRead = () => ME && ['owner', 'manager', 'viewer'].includes(ME.role);
 const canWrite = () => isMgmt();
 
+
+/* ---------------- icon system ----------------
+   Stroke icons on a 24px grid, inheriting currentColor. Replaces emoji, which
+   render differently on every device and can't take on the UI's color. */
+const ICON_PATHS = {
+  home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/>',
+  work: '<rect x="3" y="7" width="18" height="14" rx="2"/><path d="M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/>',
+  building: '<path d="M3 21V8l6-4 6 4v13"/><path d="M15 21V11l6 3v7"/><path d="M7 11h2M7 15h2M12 11h.01M12 15h.01"/>',
+  wrench: '<path d="M14.7 6.3a4 4 0 0 1 5 5L15 16l-3 5-3-3 5-3 4.7-4.7Z"/><path d="M9 9 4 4"/>',
+  chart: '<path d="M3 21h18"/><rect x="5" y="12" width="3.5" height="6" rx="1"/><rect x="10.5" y="8" width="3.5" height="10" rx="1"/><rect x="16" y="4" width="3.5" height="14" rx="1"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
+  users: '<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><path d="M16 6.5a3 3 0 0 1 0 5.8M17 20a6 6 0 0 0-1.5-4"/>',
+  truck: '<rect x="1" y="6" width="14" height="10" rx="1.5"/><path d="M15 9h4l3 3.5V16h-7"/><circle cx="6" cy="18.5" r="2"/><circle cx="18" cy="18.5" r="2"/>',
+  bell: '<path d="M18 15V10a6 6 0 1 0-12 0v5l-2 3h16l-2-3Z"/><path d="M10 21h4"/>',
+  gear: '<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M21.5 12h-2.6M5.1 12H2.5M18.7 5.3l-1.8 1.8M7.1 16.9l-1.8 1.8M18.7 18.7l-1.8-1.8M7.1 7.1 5.3 5.3"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M22 12h-2.5M4.5 12H2M19.1 4.9l-1.8 1.8M6.7 17.3l-1.8 1.8M19.1 19.1l-1.8-1.8M6.7 6.7 4.9 4.9"/>',
+  search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+  alert: '<path d="M12 3 2 20h20L12 3Z"/><path d="M12 9v5M12 17.5h.01"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
+  dollar: '<path d="M12 2v20"/><path d="M17 6.5c0-2-2.2-3-5-3s-5 1-5 3.2c0 5 10 2.6 10 7.6 0 2.2-2.2 3.4-5 3.4s-5-1.2-5-3.2"/>',
+  inbox: '<path d="M3 13h5l1.5 3h5L16 13h5"/><path d="M4.5 5.5 3 13v6h18v-6l-1.5-7.5Z"/>',
+  repeat: '<path d="M3 11V9a4 4 0 0 1 4-4h11"/><path d="m15 2 3 3-3 3"/><path d="M21 13v2a4 4 0 0 1-4 4H6"/><path d="m9 22-3-3 3-3"/>',
+  swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+  doc: '<path d="M6 2h8l4 4v16H6z"/><path d="M14 2v4h4"/><path d="M9 12h6M9 16h6"/>',
+  camera: '<path d="M3 7h4l1.5-2h7L17 7h4v13H3z"/><circle cx="12" cy="13" r="3.5"/>',
+  check: '<path d="m4 12 5 5L20 6"/>',
+  car: '<path d="M4 16h16"/><path d="M6 16V11l2-4.5h8L18 11v5"/><circle cx="7.5" cy="17.5" r="1.8"/><circle cx="16.5" cy="17.5" r="1.8"/>',
+  pin: '<path d="M12 22s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11Z"/><circle cx="12" cy="11" r="2.5"/>',
+  play: '<path d="M7 4.5 19 12 7 19.5Z"/>',
+  logout: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M10 8 6 12l4 4M6 12h9"/>'
+};
+function ico(name, size) {
+  const p = ICON_PATHS[name] || ICON_PATHS.doc;
+  return `<svg class="ico" viewBox="0 0 24 24" width="${size || 22}" height="${size || 22}" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+}
+
 /* ---------------- shell / nav ---------------- */
 const NAV_MGMT = [
-  ['#/dashboard', '⌂', 'Dashboard'], ['#/work-orders', '🗂', 'Work Orders'], ['#/properties', '🏘', 'Properties'],
-  ['#/maintenance', '🔧', 'Maintenance'], ['#/calendar', '📅', 'Calendar'], ['#/team', '👷', 'Team'],
-  ['#/vendors', '🚚', 'Vendors'], ['#/analytics', '📊', 'Analytics'], ['#/settings', '⚙', 'Settings'],
+  ['#/dashboard', 'home', 'Dashboard'], ['#/work-orders', 'work', 'Work Orders'], ['#/properties', 'building', 'Properties'],
+  ['#/maintenance', 'wrench', 'Maintenance'], ['#/calendar', 'calendar', 'Calendar'], ['#/team', 'users', 'Team'],
+  ['#/vendors', 'truck', 'Vendors'], ['#/analytics', 'chart', 'Analytics'], ['#/settings', 'gear', 'Settings'],
 ];
-const NAV_TECH = [['#/today', '☀', 'Today'], ['#/jobs', '🗂', 'Jobs'], ['#/notifications', '🔔', 'Alerts'], ['#/profile', '👤', 'Profile']];
-const TABS_MGMT = [['#/dashboard', '⌂', 'Home'], ['#/work-orders', '🗂', 'Work'], ['#/properties', '🏘', 'Props'], ['#/maintenance', '🔧', 'Maint.'], ['#/analytics', '📊', 'Data']];
+const NAV_TECH = [['#/today', 'sun', 'Today'], ['#/jobs', 'work', 'Jobs'], ['#/notifications', 'bell', 'Alerts'], ['#/profile', 'user', 'Profile']];
+const TABS_MGMT = [['#/dashboard', 'home', 'Home'], ['#/work-orders', 'work', 'Work'], ['#/properties', 'building', 'Properties'], ['#/maintenance', 'inbox', 'Requests'], ['#/analytics', 'chart', 'Insights']];
 
 let unreadCount = 0;
 async function refreshUnread() { try { const n = await GET('/notifications'); unreadCount = n.filter(x => !x.read).length; } catch (e) {} }
@@ -82,29 +137,30 @@ function shell(content, route) {
     <aside class="sidebar">
       <div class="brand"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
       <div style="padding:0 12px 14px;font-size:12px;color:#8FA0A8;font-weight:600">${esc(ME.org_name || '')}</div>
-      ${nav.map(([h, i, l]) => `<a class="nav-item ${route.startsWith(h) ? 'active' : ''}" href="${h}"><span>${i}</span>${l}</a>`).join('')}
+      ${nav.map(([h, i, l]) => `<a class="nav-item ${route.startsWith(h) ? 'active' : ''}" href="${h}">${ico(i, 20)}${l}</a>`).join('')}
       <div class="nav-spacer"></div>
-      <a class="nav-item ${route.startsWith('#/notifications') ? 'active' : ''}" href="#/notifications"><span>🔔</span>Notifications ${unreadCount ? `<span style="background:var(--amber);color:#17242D;border-radius:99px;padding:1px 8px;font-size:11px;margin-left:auto">${unreadCount}</span>` : ''}</a>
-      <div class="nav-user"><div>${esc(ME.name)}</div><div class="role">${ME.role}${ME.role === 'viewer' ? ' · read-only' : ''}</div><button id="btn-logout">Sign out</button></div>
+      <a class="nav-item ${route.startsWith('#/notifications') ? 'active' : ''}" href="#/notifications">${ico('bell', 20)}Notifications ${unreadCount ? `<span class="nav-count">${unreadCount}</span>` : ''}</a>
+      <div class="nav-user"><div>${esc(ME.name)}</div><div class="role">${ME.role}${ME.role === 'viewer' ? ' · read-only' : ''}</div><button id="btn-logout">${ico('logout', 16)} Sign out</button></div>
     </aside>
     <div class="main">
       <div class="topbar">
         <div class="brand" style="display:${window.innerWidth >= 900 ? 'none' : 'flex'}"><svg class="brand-mark" viewBox="0 0 112 112" xmlns="http://www.w3.org/2000/svg"><rect width="112" height="112" rx="26" fill="#0E5A50"/><rect x="30" y="56" width="52" height="34" rx="4" fill="#F4F6F5"/><rect x="49" y="68" width="14" height="22" rx="2" fill="#0E5A50"/><path d="M22 58 L56 30 L74 45 L96 20" fill="none" stroke="#FFCE34" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/></svg> Steadhold</div>
         <div class="grow"></div>
-        ${canRead() ? `<button class="icon-btn" id="btn-search" aria-label="Search">🔍</button>` : ''}
-        <a class="icon-btn" href="#/notifications" aria-label="Notifications">🔔${unreadCount ? '<span class="badge-dot"></span>' : ''}</a>
-        <button class="icon-btn acct-btn" id="btn-acct" aria-label="Account menu">👤</button>
+        ${canRead() ? `<button class="icon-btn" id="btn-search" aria-label="Search">${ico('search', 19)}</button>` : ''}
+        <a class="icon-btn" href="#/notifications" aria-label="Notifications">${ico('bell', 19)}${unreadCount ? '<span class="badge-dot"></span>' : ''}</a>
+        <button class="icon-btn acct-btn" id="btn-acct" aria-label="Account menu">${ico('user', 19)}</button>
       </div>
       <div class="page">${content}</div>
     </div>
   </div>
-  <nav class="tabbar">${tabs.map(([h, i, l]) => `<a class="tab ${route.startsWith(h) ? 'active' : ''}" href="${h}"><span class="ti">${i}</span>${l}</a>`).join('')}</nav>`;
+  <nav class="tabbar">${tabs.map(([h, i, l]) => `<a class="tab ${route.startsWith(h) ? 'active' : ''}" href="${h}"><span class="ti">${ico(i, 23)}</span>${l}</a>`).join('')}</nav>`;
   const lo = document.getElementById('btn-logout');
   if (lo) lo.onclick = doLogout;
   const sb = document.getElementById('btn-search');
   if (sb) sb.onclick = openSearch;
   const ab = document.getElementById('btn-acct');
   if (ab) ab.onclick = openAccountMenu;
+  paintConnState();
 }
 function loadingShell(route) { shell('<div class="skel"></div><div class="skel"></div><div class="skel" style="height:180px"></div>', route); }
 
@@ -157,15 +213,15 @@ async function doLogout() {
 }
 function openAccountMenu() {
   const links = canRead()
-    ? [['#/calendar', '📅', 'Calendar'], ['#/team', '👷', 'Team'], ['#/vendors', '🚚', 'Vendors'], ['#/notifications', '🔔', 'Notifications'], ['#/settings', '⚙', 'Settings']]
-    : [['#/notifications', '🔔', 'Notifications'], ['#/profile', '👤', 'Profile']];
+    ? [['#/calendar', 'calendar', 'Calendar'], ['#/team', 'users', 'Team'], ['#/vendors', 'truck', 'Vendors'], ['#/notifications', 'bell', 'Notifications'], ['#/settings', 'gear', 'Settings']]
+    : [['#/notifications', 'bell', 'Notifications'], ['#/profile', 'user', 'Profile']];
   modal(`
     <div style="padding:2px 2px 10px">
       <div style="font-weight:800;font-family:var(--font-d);font-size:17px">${esc(ME.name)}</div>
       <div class="s" style="color:var(--muted)">${esc(ME.email)} · ${ME.role}${ME.role === 'viewer' ? ' (read-only)' : ''}</div>
       <div class="s" style="color:var(--muted)">${esc(ME.org_name || '')}</div>
     </div>
-    ${links.map(([h, i, l]) => `<a class="list-item" href="${h}" onclick="closeModal()"><div class="body"><div class="t">${i}&nbsp; ${l}</div></div><div class="end">›</div></a>`).join('')}
+    ${links.map(([h, i, l]) => `<a class="list-item menu-row" href="${h}" onclick="closeModal()"><span class="mi">${ico(i, 19)}</span><div class="body"><div class="t">${l}</div></div><div class="end">›</div></a>`).join('')}
     <button class="btn danger full" style="margin-top:14px" onclick="doLogout()">Sign out</button>`);
 }
 window.doLogout = doLogout;
@@ -398,10 +454,27 @@ async function renderOnboarding() {
   draw();
 }
 
-async function bootMeta() { try { META = await GET('/meta'); } catch (e) {} await refreshUnread(); }
+async function bootMeta() { try { META = await GET('/meta'); } catch (e) {} await refreshUnread(); warmCache(); }
+
+// Pre-load the screens this person will need if they lose signal mid-shift.
+// Runs quietly in the background; failures are irrelevant since it's only a warm-up.
+let _warmed = false;
+async function warmCache() {
+  if (_warmed || !window.Offline.online || !ME) return;
+  _warmed = true;
+  const paths = canRead()
+    ? ['/auth/me', '/meta', '/dashboard', '/work-orders?open=1', '/properties', '/requests', '/notifications']
+    : ['/auth/me', '/meta', '/work-orders', '/work-orders?open=1', '/notifications'];
+  for (const p of paths) { try { await GET(p); } catch (e) {} }
+  // Each open job's full detail, so a tech can work a job with no bars at all
+  try {
+    const jobs = await GET('/work-orders?open=1');
+    for (const w of (jobs || []).slice(0, 25)) { try { await GET('/work-orders/' + w.id); } catch (e) {} }
+  } catch (e) {}
+}
 
 /* ---------------- dashboard: Attention Center ---------------- */
-const ATTN_ICO = { emergency: '🚨', approval: '💵', overdue: '⏰', triage: '📥', owner_review: '👤', repeat: '↻', pm: '🔁', anomaly: '💸', rvr: '🔄', quote: '📋' };
+const ATTN_ICO = { emergency: 'alert', approval: 'dollar', overdue: 'clock', triage: 'inbox', owner_review: 'user', repeat: 'repeat', pm: 'calendar', anomaly: 'chart', rvr: 'swap', quote: 'doc' };
 async function renderDashboard() {
   loadingShell('#/dashboard');
   const d = await GET('/dashboard');
@@ -414,8 +487,8 @@ async function renderDashboard() {
     <div class="section-title" style="margin-top:0">What needs my attention?</div>
     ${d.attention.length ? d.attention.map((g, i) => `
       <div class="attn-group">
-        <div class="attn-head ${g.type === 'emergency' ? 'emergency' : ''}" onclick="${g.items.length ? `document.getElementById('ag${i}').style.display=document.getElementById('ag${i}').style.display==='none'?'block':'none'` : `location.hash='${g.link || '#/dashboard'}'`}">
-          <span class="ico">${ATTN_ICO[g.type] || '⚠'}</span>
+        <div class="attn-head lvl-${g.level || 'watch'}" onclick="${g.items.length ? `document.getElementById('ag${i}').style.display=document.getElementById('ag${i}').style.display==='none'?'block':'none'` : `location.hash='${g.link || '#/dashboard'}'`}">
+          <span class="attn-ico">${ico(ATTN_ICO[g.type] || 'alert', 19)}</span>
           <span class="cnt">${g.count}</span>
           <span class="t">${esc(g.title)}</span>
           <span class="go">${g.items.length ? '▾' : '›'}</span>
@@ -716,7 +789,7 @@ async function renderWODetail(id) {
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">${pri(w.priority)} ${chip(w.status)} ${w.overdue ? '<b style="color:var(--red);font-size:13px">OVERDUE</b>' : ''}</div>
       <div class="kv" style="margin-top:14px">
         <div><div class="k">Property</div><div class="v">${canRead() ? `<a href="#/properties/${w.property_id}" style="color:var(--pine)">${esc(w.property_name)}</a>` : esc(w.property_name)}${w.unit_label ? ' · Unit ' + esc(w.unit_label) : ''}</div></div>
-        <div><div class="k">Address</div><div class="v">${esc(w.address)}${w.city ? ', ' + esc(w.city) : ''}</div></div>
+        <div><div class="k">Address</div><div class="v"><span class="nav-link" onclick="openMaps('${esc(w.address)}, ${esc(w.city || '')}')">${ico('pin', 15)} ${esc(w.address)}${w.city ? ', ' + esc(w.city) : ''}</span></div></div>
         <div><div class="k">Assigned to</div><div class="v">${esc(w.tech_name || w.vendor_company || 'Unassigned')}</div></div>
         <div><div class="k">Scheduled</div><div class="v">${fmtDate(w.scheduled_date)} · due ${fmtDate(w.due_date)}</div></div>
         <div><div class="k">Cost so far</div><div class="v money">${money(w.total_cost)}</div></div>
@@ -744,23 +817,23 @@ async function renderWODetail(id) {
     ${(isTech || isVendor) && openStatus ? `
     <div class="card">
       <div class="card-title">Job actions</div>
-      ${!workActive && !travelActive && !arrivedAlready && ['assigned', 'scheduled', 'new', 'waiting_vendor'].includes(w.status) ? `<button class="btn pri full big" onclick="travelStart()">🚗 START TRAVEL</button>` : ''}
-      ${travelActive ? `<button class="btn pri full big" onclick="arrived()">📍 ARRIVED ON SITE</button>` : ''}
+      ${!workActive && !travelActive && !arrivedAlready && ['assigned', 'scheduled', 'new', 'waiting_vendor'].includes(w.status) ? `<button class="btn pri full big" onclick="travelStart()">${ico('car', 20)} Start travel</button>` : ''}
+      ${travelActive ? `<button class="btn pri full big" onclick="arrived()">${ico('pin', 20)} I've arrived</button>` : ''}
       ${!workActive && !travelActive ? (() => {
         const needsBefore = d.completion.items.some(i => i.key === 'before_photo' && i.required && !i.done);
         return needsBefore
-          ? `<label class="btn sec full big" style="margin-top:8px;display:block;text-align:center;cursor:pointer">📷 TAKE BEFORE PHOTO TO START<input type="file" accept="image/*" capture="environment" hidden onchange="uploadPhoto(this,'before')"></label>
+          ? `<label class="btn sec full big" style="margin-top:8px;display:block;text-align:center;cursor:pointer">${ico('camera', 20)} Take before photo to start<input type="file" accept="image/*" capture="environment" hidden onchange="uploadPhoto(this,'before')"></label>
              <div class="s" style="text-align:center;margin-top:6px;color:var(--muted)">A before photo is required for ${esc(w.category)} jobs.</div>`
-          : `<button class="btn ${arrivedAlready ? 'pri' : 'sec'} full big" style="margin-top:8px" onclick="woStart()">▶ START WORK</button>`;
+          : `<button class="btn ${arrivedAlready ? 'pri' : 'sec'} full big" style="margin-top:8px" onclick="woStart()">${ico('play', 19)} Start work</button>`;
       })() : ''}
       ${workActive ? `
-        <div class="timer-live">⏱ Working — started ${fmtTime(workActive.started_at)}</div>
-        <button class="btn pri full big" onclick="openComplete()">✓ COMPLETE JOB</button>
+        <div class="timer-live">${ico('clock', 16)} Working since ${fmtTime(workActive.started_at)}</div>
+        <button class="btn pri full big" onclick="openComplete()">${ico('check', 20)} Complete job</button>
         <div class="row2" style="margin-top:8px">
           <button class="btn sec full" onclick="woStatus('waiting_parts')">Waiting for parts</button>
           <button class="btn sec full" onclick="requestApproval()">Request approval</button>
         </div>` : ''}
-      ${!workActive && ['in_progress', 'waiting_parts', 'waiting_approval'].includes(w.status) ? `<button class="btn pri full big" style="margin-top:8px" onclick="openComplete()">✓ COMPLETE JOB</button>` : ''}
+      ${!workActive && ['in_progress', 'waiting_parts', 'waiting_approval'].includes(w.status) ? `<button class="btn pri full big" style="margin-top:8px" onclick="openComplete()">${ico('check', 20)} Complete job</button>` : ''}
     </div>` : ''}
     ${canWrite() && openStatus ? `<div class="card"><div class="card-title">Manage</div>
       <div class="row2">
@@ -849,10 +922,12 @@ async function renderWODetail(id) {
 }
 
 /* --- WO detail action helpers --- */
-window.travelStart = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/travel/start`, {}); toast('Travel started'); render(); } catch (e) { toast(e.message); } };
-window.arrived = async () => { try { await POST(`/work-orders/${CURRENT_WO.wo.id}/arrived`, {}); toast('Arrival recorded'); render(); } catch (e) { toast(e.message); } };
+// Hand the destination to whichever maps app the tech already uses
+window.openMaps = addr => window.open('https://maps.google.com/?q=' + encodeURIComponent(addr), '_blank');
+window.travelStart = async () => { try { const r = await POST(`/work-orders/${CURRENT_WO.wo.id}/travel/start`, {}); toast(isQueued(r) ? 'Travel started — saved offline' : 'Travel started'); render(); } catch (e) { toast(e.message); } };
+window.arrived = async () => { try { const r = await POST(`/work-orders/${CURRENT_WO.wo.id}/arrived`, {}); toast(isQueued(r) ? 'Arrival saved offline' : 'Arrival recorded'); render(); } catch (e) { toast(e.message); } };
 window.woStart = async (override) => {
-  try { await POST(`/work-orders/${CURRENT_WO.wo.id}/time/start`, override ? { override: true, override_note: override } : {}); toast('Work timer started'); render(); }
+  try { const r = await POST(`/work-orders/${CURRENT_WO.wo.id}/time/start`, override ? { override: true, override_note: override } : {}); toast(isQueued(r) ? 'Work started — saved offline' : 'Work timer started'); render(); }
   catch (e) {
     if (e.data && e.data.needs === 'before_photo' && canWrite()) {
       confirmModal('Start without a before photo?', 'A before photo is required for this category. Starting anyway will be logged.',
@@ -880,9 +955,9 @@ window.openComplete = () => {
   if (ovr) ovr.onchange = () => { document.getElementById('ovr-note-w').style.display = ovr.checked ? 'block' : 'none'; };
   document.getElementById('cmp-go').onclick = async () => {
     try {
-      await PATCH(`/work-orders/${CURRENT_WO.wo.id}`, { status: 'completed', completion_notes: fv('cmp-notes') || undefined,
+      const r = await PATCH(`/work-orders/${CURRENT_WO.wo.id}`, { status: 'completed', completion_notes: fv('cmp-notes') || undefined,
         override: ovr ? ovr.checked : false, override_note: fv('cmp-ovr-note') || undefined });
-      closeModal(); toast('Job completed'); render();
+      closeModal(); toast(isQueued(r) ? 'Job completed — saved offline' : 'Job completed'); render();
     } catch (e) {
       toast(e.message);
     }
@@ -893,7 +968,7 @@ window.uploadPhoto = async (input, kind) => {
   if (!input.files || !input.files[0]) return;
   const fd = new FormData();
   fd.append('photo', input.files[0]); fd.append('kind', kind);
-  try { await api(`/work-orders/${CURRENT_WO.wo.id}/photos`, { method: 'POST', body: fd }); toast('Photo added'); render(); }
+  try { const r = await api(`/work-orders/${CURRENT_WO.wo.id}/photos`, { method: 'POST', body: fd }); toast(isQueued(r) ? 'Photo saved — will upload when you reconnect' : 'Photo added'); render(); }
   catch (e) { toast(e.message); }
 };
 window.addNote = async isVoice => {
@@ -1022,13 +1097,15 @@ function jobCard(w, emphasized) {
     ${emphasized ? '<div class="next-label">NEXT JOB</div>' : ''}
     <div class="s">${w.number} · ${esc(w.category)} ${w.overdue ? '<b style="color:var(--red)">· OVERDUE</b>' : ''}</div>
     <div class="t">${esc(w.title)}</div>
-    <div class="s">${esc(w.property_name)}${w.unit_label ? ' · Unit ' + esc(w.unit_label) : ''} · ${esc(w.address)}</div>
-    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">${pri(w.priority)} ${chip(w.status)} <span class="s">est ${fmtMin(w.estimated_minutes)}</span></div>
+    <div class="s">${esc(w.property_name)}${w.unit_label ? ' · Unit ' + esc(w.unit_label) : ''}</div>
+    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">${pri(w.priority)} ${chip(w.status)} <span class="s">est ${fmtMin(w.estimated_minutes)}</span></div>
+    <span class="nav-link" onclick="event.preventDefault();event.stopPropagation();openMaps('${esc(w.address)}, ${esc(w.city || '')}')">${ico('pin', 16)} ${esc(w.address)}</span>
   </a>`;
 }
 async function renderToday() {
   loadingShell('#/today');
   const wos = await GET('/work-orders?open=1');
+  const staleNote = wos.__offline ? `<div class="banner off">${ico('alert', 15)} Offline — showing the jobs saved on this phone. Anything you do now syncs when you reconnect.</div>` : '';
   const today = new Date().toISOString().slice(0, 10);
   const emergencies = wos.filter(w => w.priority === 'emergency');
   const todays = wos.filter(w => w.priority !== 'emergency' && (w.scheduled_date === today || !w.scheduled_date || w.scheduled_date < today));
@@ -1036,6 +1113,7 @@ async function renderToday() {
   const waiting = wos.filter(w => ['waiting_parts', 'waiting_approval'].includes(w.status));
   const queue = todays.filter(w => !['waiting_parts', 'waiting_approval', 'in_progress'].includes(w.status));
   shell(`
+    ${staleNote}
     <div class="hello">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 17 ? 'afternoon' : 'evening'}, ${esc(ME.name.split(' ')[0])}.
       <div class="s">${emergencies.length ? `🚨 ${emergencies.length} emergency — handle first` : `${queue.length + (active ? 1 : 0)} job${queue.length + (active ? 1 : 0) === 1 ? '' : 's'} on your plate today`}</div>
     </div>
@@ -1169,7 +1247,7 @@ async function renderPropertyDetail(id, qs) {
       <div class="cell"><div class="v ${s.pm_overdue ? 'bad' : ''}">${s.pm_overdue ? s.pm_overdue + ' overdue' : s.pm_upcoming}</div><div class="l">${s.pm_overdue ? 'PM overdue' : 'PM upcoming'}</div></div>
       <div class="cell"><div class="v ${s.assets_near_replacement ? 'warn' : ''}">${s.assets_near_replacement}</div><div class="l">Assets near replacement</div></div>
     </div>
-    ${s.repeat_warnings ? `<div class="banner warn">↻ ${s.repeat_warnings} repeat-repair pattern${s.repeat_warnings > 1 ? 's' : ''} at this property — see health details.</div>` : ''}
+    ${s.repeat_warnings ? `<div class="banner warn">${ico('repeat', 16)} ${s.repeat_warnings} repeat-repair pattern${s.repeat_warnings > 1 ? 's' : ''} at this property — see health details.</div>` : ''}
 
     <div class="filters">${TABS.map(([k, l]) => `<a class="fpill ${tab === k ? 'on' : ''}" href="#/properties/${id}?tab=${k}">${l}</a>`).join('')}</div>
 
@@ -1783,14 +1861,36 @@ function openSearch() {
 }
 
 /* ---------------- router ---------------- */
-async function render() {
+async function render() { try { await routeRender(); } catch (err) { renderLoadError(err); } }
+
+function renderLoadError(err) {
+  const offline = err && (err.offline || !window.Offline.online);
+  const body = offline
+    ? `<div class="card empty"><div style="font-weight:700;margin-bottom:6px">This screen isn't available offline</div>
+       <div class="s">It hasn't been opened on this phone yet. Your saved jobs are still available, and anything you do now will sync when you're back in signal.</div>
+       <div class="row2" style="margin-top:14px"><a class="btn pri full" href="${canRead() ? '#/dashboard' : '#/today'}">Go to ${canRead() ? 'dashboard' : "today's jobs"}</a>
+       <button class="btn sec full" onclick="render()">Try again</button></div></div>`
+    : `<div class="card empty"><div style="font-weight:700;margin-bottom:6px">Couldn't load this screen</div>
+       <div class="s">${esc((err && err.message) || 'Something went wrong.')}</div>
+       <button class="btn pri full" style="margin-top:14px" onclick="render()">Try again</button></div>`;
+  try { shell(body, location.hash || '#/'); } catch (e) { $app.innerHTML = body; }
+  paintConnState();
+}
+
+async function routeRender() {
   const hash = location.hash || '#/';
   const [path, qs] = hash.split('?');
   if (path.startsWith('#/report/')) return renderReport(path.split('/')[2]);
   if (!ME) {
     if (path.startsWith('#/join')) return renderJoin(qs);
     try { ME = await GET('/auth/me'); await bootMeta(); }
-    catch (e) { return renderLogin(null, path === '#/signup' ? 'signup' : 'login'); }
+    catch (e) {
+      if (e.offline) {                      // opened with no signal — trust the cached session
+        const cached = await window.Offline.request('/auth/me').catch(() => null);
+        if (cached && cached.id) { ME = cached; await bootMeta(); }
+        else return renderLogin('You appear to be offline. Sign in once with a connection and the app will work without one afterwards.', 'login');
+      } else return renderLogin(null, path === '#/signup' ? 'signup' : 'login');
+    }
   }
   if (path.startsWith('#/join')) return renderJoin(qs);
   const seg = path.split('/').filter(Boolean);   // ['#','work-orders','12']
@@ -1820,6 +1920,20 @@ async function render() {
   };
   (routes[page] || renderDashboard)();
 }
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+// Reflect connection + queue state in the UI, and refresh the view when a sync lands
+let _lastPending = -1, _lastOnline = null;
+window.Offline.onChange(() => {
+  paintConnState();
+  const p = window.Offline.pending, on = window.Offline.online;
+  if (_lastPending > 0 && p === 0 && on) render();   // queue drained — pull the real server state
+  if (_lastOnline === false && on) render();
+  _lastPending = p; _lastOnline = on;
+  const rej = window.Offline.takeRejected();
+  if (rej.length) toast(`${rej.length} queued change${rej.length > 1 ? 's' : ''} couldn't be applied: ${rej[0].reason}`);
+});
 
 window.addEventListener('hashchange', render);
 render();
