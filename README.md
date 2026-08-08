@@ -37,6 +37,14 @@ node test/api.test.js   # run the 57-check test suite (server must be running)
 - **Public tenant intake** — every property has a shareable link and printable QR poster (Property page → "Tenant request link"). Tenants report issues with photos, access notes, pets, and availability — no account, no app. Submissions land in the triage queue, notify management instantly, and photos + access details carry onto the converted work order. Rate-limited; links are unguessable and can be reset per property at any time.
 - **Owner-review routing (per property)** — owners choose whether tenant requests go straight to maintenance triage or are held for the owner to review and release first (emergencies always go straight through). Viewers — the read-only owner/investor role — can also submit maintenance requests themselves, recorded as owner-reported.
 
+## Offline support
+Technicians work in basements and crawlspaces, so the app keeps working with no signal:
+- **App shell cached** by a service worker — Steadhold opens instantly with zero bars, even on a cold launch, and the signed-in session persists.
+- **Read cache** — every screen loaded while online is stored in IndexedDB and served back offline. After sign-in the app quietly pre-loads the day: open jobs, each job'''s full detail, properties, requests, and notifications.
+- **Write queue** — travel/arrival, timers, notes, photos, materials, expenses, approvals, and completions made offline are stored durably (photos as blobs) and replayed in order on reconnect. Order matters: a queued photo lands before the completion that requires it.
+- **Idempotent replay** — every queued mutation carries an op id (`X-Client-Op-Id`). The server records applied ops in a `client_ops` table and replays the original result for duplicates, so a flaky reconnect can never create two work orders or double-charge an expense.
+- **Honest UI** — a persistent strip shows "Working offline · N changes waiting to sync", confirmations say when something was saved locally rather than sent, and a screen never visited online explains itself instead of spinning forever.
+
 ## Architecture
 - **Backend:** Node + Express + better-sqlite3 (`src/db.js` schema+migration, `src/api.js` REST, `src/insights.js` analytics, `src/seed.js` + `src/seed2.js` demo data)
 - **Frontend:** dependency-free vanilla SPA (`public/js/app.js`), hash routing, role-aware
