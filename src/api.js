@@ -575,9 +575,20 @@ router.post('/properties/:id/units', MGMT_WRITE, (req, res) => {
   if (!p) return notFound(res);
   const { label, beds, baths, sqft } = req.body || {};
   if (!label) return res.status(400).json({ error: 'Unit label is required' });
-  const id = db.prepare(`INSERT INTO units (organization_id,property_id,label,beds,baths,sqft) VALUES (?,?,?,?,?,?)`)
-    .run(req.oid, p.id, label, +beds || null, +baths || null, +sqft || null).lastInsertRowid;
+  const id = db.prepare(`INSERT INTO units (organization_id,property_id,label,beds,baths,sqft,occupied) VALUES (?,?,?,?,?,?,?)`)
+    .run(req.oid, p.id, label, +beds || null, +baths || null, +sqft || null, req.body.occupied ? 1 : 0).lastInsertRowid;
   res.json({ id });
+});
+
+router.patch('/units/:id', MGMT_WRITE, (req, res) => {
+  const u = db.prepare('SELECT id FROM units WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
+  if (!u) return notFound(res);
+  const fields = ['label', 'beds', 'baths', 'sqft'];
+  const sets = [], vals = [];
+  for (const f of fields) if (f in req.body) { sets.push(`${f}=?`); vals.push(req.body[f]); }
+  if ('occupied' in req.body) { sets.push('occupied=?'); vals.push(req.body.occupied ? 1 : 0); }
+  if (sets.length) { vals.push(u.id); db.prepare(`UPDATE units SET ${sets.join(',')} WHERE id=?`).run(...vals); }
+  res.json({ ok: true });
 });
 
 router.post('/properties/:id/assets', MGMT_WRITE, (req, res) => {
@@ -916,6 +927,14 @@ router.post('/work-orders/:id/time/start', (req, res) => {
   const w = getWOOr404(req, res); if (!w) return;
   if (db.prepare('SELECT id FROM time_logs WHERE work_order_id=? AND user_id=? AND ended_at IS NULL').get(w.id, req.user.id))
     return res.status(400).json({ error: 'A timer is already running on this job' });
+  // If this category requires a before photo, it must be taken BEFORE work starts —
+  // that's the whole point of a "before" photo. Managers may override.
+  const reqs = requirementsFor(req.oid, w.category);
+  if (reqs && reqs.before_photo && !db.prepare(`SELECT 1 FROM photos WHERE work_order_id=? AND kind='before'`).get(w.id)) {
+    if (!(isMgmt(req.user) && req.body && req.body.override === true))
+      return res.status(400).json({ error: 'Take a before photo first — it documents the original condition.', needs: 'before_photo' });
+    hist(req.oid, w.id, req.user.id, 'before_photo_override', `Started work without a before photo${req.body.override_note ? ' — ' + req.body.override_note : ''}`);
+  }
   db.prepare('INSERT INTO time_logs (organization_id,work_order_id,user_id,kind,started_at) VALUES (?,?,?,?,?)').run(req.oid, w.id, req.user.id, 'work', now());
   if (['assigned', 'scheduled', 'new'].includes(w.status)) {
     db.prepare(`UPDATE work_orders SET status='in_progress' WHERE id=?`).run(w.id);
