@@ -15,7 +15,7 @@ const PATCH = (p, b) => api(p, { method: 'PATCH', body: b });
 const PUT = (p, b) => api(p, { method: 'PUT', body: b });
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = n => '$' + (+n || 0).toLocaleString(undefined, { maximumFractionDigits: (+n % 1 ? 2 : 0) });
+const money = n => '$' + (+n || 0).toLocaleString(undefined, (+n % 1) ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 0 });
 const STATUS_LABEL = { new: 'New', assigned: 'Assigned', scheduled: 'Scheduled', in_progress: 'In progress', waiting_parts: 'Waiting for parts', waiting_approval: 'Waiting for approval', waiting_vendor: 'Waiting for vendor', completed: 'Completed', cancelled: 'Cancelled' };
 const STATUS_COLOR = { new: '#7A5BC7', assigned: '#6B7A82', scheduled: '#3568C9', in_progress: '#0E5A50', waiting_parts: '#F0A400', waiting_approval: '#C98A00', waiting_vendor: '#8A6FD1', completed: '#2E8B57' };
 const chip = s => `<span class="chip ${s === 'waiting_vendor' ? 'waiting_approval' : s}">${STATUS_LABEL[s] || s}</span>`;
@@ -25,11 +25,15 @@ function fmtDateFull(d) { if (!d) return '—'; const dt = new Date((d + '').rep
 function fmtDateTime(d) { if (!d) return '—'; const dt = new Date((d + '').replace(' ', 'T')); return dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ' + dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
 function fmtTime(d) { const dt = new Date((d + '').replace(' ', 'T')); return dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
 function fmtMin(m) { if (m == null) return '—'; const h = Math.floor(m / 60); return h ? `${h}h ${m % 60}m` : `${m}m`; }
-function propGradient(id) {
-  const hues = [[168, 38], [204, 45], [24, 60], [262, 40], [140, 38], [332, 42], [48, 55], [190, 42]];
-  const [h, s] = hues[id % hues.length];
-  return `background:linear-gradient(135deg,hsl(${h},${s}%,34%),hsl(${(h + 28) % 360},${s}%,48%))`;
+// Property mark: unit count over a building glyph. Reads at a glance and tells you
+// something true about the property, unlike initials or a random gradient.
+function propMark(p, size) {
+  const n = p.unit_count || 0;
+  return `<span class="pmark ${size || ''}"><span class="n">${n || '—'}</span><span class="u">${n === 1 ? 'unit' : 'units'}</span></span>`;
 }
+const PROP_TYPE_LABEL = { duplex: 'Duplex', triplex: 'Triplex', quadplex: 'Quadplex', fourplex: 'Fourplex',
+  'single-family': 'Single family', 'small multifamily': 'Multifamily' };
+const propType = t => PROP_TYPE_LABEL[t] || (t ? t[0].toUpperCase() + t.slice(1) : 'Property');
 function healthRing(score) {
   const cls = score >= 80 ? 'h-good' : score >= 60 ? 'h-ok' : 'h-bad';
   return `<span class="health"><span class="ring ${cls}">${score}</span></span>`;
@@ -1175,11 +1179,19 @@ async function renderProperties(qs) {
     <div class="prop-grid">
       ${props.map(p => `
         <a class="prop-card" href="#/properties/${p.id}">
-          <div class="prop-hero" style="${propGradient(p.id)}"><span>${esc(p.name.split(' ').map(w => w[0]).join('').slice(0, 3))}</span></div>
-          <div class="prop-body">
-            <div style="display:flex;justify-content:space-between;align-items:center"><b>${esc(p.name)}</b>${healthRing(p.health)}</div>
-            <div class="s">${esc(p.address)}${p.city ? ', ' + esc(p.city) : ''}</div>
-            <div class="s" style="margin-top:5px">${p.unit_count} unit${p.unit_count === 1 ? '' : 's'} · ${p.open_wos} open · <span class="money">${money(p.ytd_cost)}</span> YTD</div>
+          <div class="pc-top">
+            ${propMark(p)}
+            <div class="pc-id">
+              <b>${esc(p.name)}</b>
+              <div class="s">${esc(p.address)}${p.city ? ', ' + esc(p.city) : ''}</div>
+              <div class="s pc-type">${esc(propType(p.type))}${p.year_built ? ' · ' + p.year_built : ''}</div>
+            </div>
+            ${healthRing(p.health)}
+          </div>
+          <div class="pc-stats">
+            <span class="${p.open_wos ? 'on' : ''}"><b>${p.open_wos}</b> open</span>
+            <span><b>${money(p.ytd_cost)}</b> YTD</span>
+            ${p.unit_count ? `<span><b>${money(p.ytd_cost / p.unit_count)}</b> per unit</span>` : ''}
           </div>
         </a>`).join('')}
     </div>
@@ -1251,8 +1263,14 @@ async function renderPropertyDetail(id, qs) {
   const TABS = [['overview', 'Overview'], ['timeline', `History (${d.timeline.length})`], ['assets', `Assets (${d.assets.length})`], ['expenses', 'Expenses'], ['pm', `PM (${d.pm.length})`]];
   shell(`
     <a class="more" href="#/properties" style="font-size:13.5px">‹ Properties</a>
-    <div class="prop-hero lg" style="${propGradient(p.id)};margin-top:10px"><span>${esc(p.name)}</span></div>
-    <div class="s" style="margin:8px 0 2px">${esc(p.address)}${p.city ? ', ' + esc(p.city) : ''} · ${esc(p.type || '')}${p.year_built ? ' · built ' + p.year_built : ''}</div>
+    <div class="prop-head">
+      ${propMark({ unit_count: s.unit_count }, 'lg')}
+      <div>
+        <h1>${esc(p.name)}</h1>
+        <div class="s"><span class="nav-link plain" onclick="openMaps('${esc(p.address)}, ${esc(p.city || '')}')">${ico('pin', 14)} ${esc(p.address)}${p.city ? ', ' + esc(p.city) : ''}</span></div>
+        <div class="s pc-type">${esc(propType(p.type))}${p.year_built ? ' · built ' + p.year_built : ''}</div>
+      </div>
+    </div>
 
     <div class="snap" style="margin-top:12px">
       <div class="cell"><div class="v ${s.open_wos ? '' : ''}">${s.open_wos}</div><div class="l">Open work orders</div></div>
