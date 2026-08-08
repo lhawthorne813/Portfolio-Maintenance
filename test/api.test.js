@@ -192,6 +192,31 @@ function ok(cond, name, extra) {
   ok((await call('manager', 'PATCH', '/units/' + nu.id, { occupied: 1 })).status === 200, 'unit occupancy can be toggled');
   ok((await call('viewer', 'PATCH', '/units/' + nu.id, { occupied: 0 })).status === 403, 'viewers cannot change occupancy');
 
+  console.log('\nOFFLINE SYNC IDEMPOTENCY');
+  const idWo = (await call('manager', 'POST', '/work-orders', { property_id: 1, category: 'General', title: 'AUTOTEST idem' })).data;
+  async function opCall(op, body) {
+    const r = await fetch(BASE + `/work-orders/${idWo.id}/comments`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: jars.manager, 'X-Client-Op-Id': op }, body: JSON.stringify(body) });
+    return { status: r.status, replayed: r.headers.get('x-replayed'), data: await r.json().catch(() => ({})) };
+  }
+  const o1 = await opCall('AUTOTEST-op-1', { body: 'AUTOTEST idempotent note' });
+  const o2 = await opCall('AUTOTEST-op-1', { body: 'AUTOTEST idempotent note' });
+  ok(o1.status === 200 && o2.status === 200, 'replayed op returns success, not an error');
+  ok(o2.replayed === '1', 'server flags the second attempt as a replay');
+  ok(o1.data.id === o2.data.id, 'replay returns the original result rather than creating a second record');
+  const cmts = (await call('manager', 'GET', '/work-orders/' + idWo.id)).data.comments.filter(c => c.body.includes('AUTOTEST idempotent'));
+  ok(cmts.length === 1, 'a replayed mutation creates exactly one record');
+  const o3 = await opCall('AUTOTEST-op-2', { body: 'AUTOTEST second distinct note' });
+  ok(o3.replayed !== '1' && o3.data.id !== o1.data.id, 'a different op id still applies normally');
+  const dupWo = await fetch(BASE + '/work-orders', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: jars.manager, 'X-Client-Op-Id': 'AUTOTEST-wo-op' },
+    body: JSON.stringify({ property_id: 1, category: 'General', title: 'AUTOTEST queued wo' }) });
+  const dupWo2 = await fetch(BASE + '/work-orders', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: jars.manager, 'X-Client-Op-Id': 'AUTOTEST-wo-op' },
+    body: JSON.stringify({ property_id: 1, category: 'General', title: 'AUTOTEST queued wo' }) });
+  const w1 = await dupWo.json(), w2 = await dupWo2.json();
+  ok(w1.id === w2.id, 'a replayed work-order creation does not duplicate the job');
+
   console.log('\nPHONE PUSH');
   const vk = await call('owner', 'GET', '/push/vapid-public-key');
   ok(vk.status === 200 && vk.data.key && vk.data.key.length > 40, 'VAPID public key served');
