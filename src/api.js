@@ -83,6 +83,16 @@ function notify(orgId, userIds, kind, title, body, link) {
   }
 }
 function captureAppUrl(req) { if (!APP_URL) APP_URL = `${req.protocol}://${req.get('host')}`; }
+// Many small operators run without a manager: the owner works directly with the technician.
+// Where that's true, the app collapses the manager tier instead of implying a person who doesn't exist.
+function hasManagers(orgId) {
+  return !!db.prepare(`SELECT 1 FROM users WHERE organization_id=? AND role='manager' AND active=1`).get(orgId);
+}
+// Who a tech should contact about a job: their assigned supervisor, else the owner.
+function supervisorFor(orgId) {
+  return db.prepare(`SELECT name, phone, email, role FROM users WHERE organization_id=? AND role IN ('manager','owner') AND active=1
+    ORDER BY role='manager' DESC, id LIMIT 1`).get(orgId) || null;
+}
 function mgmtIds(orgId) { return db.prepare(`SELECT id FROM users WHERE organization_id=? AND role IN ('owner','manager') AND active=1`).all(orgId).map(r => r.id); }
 function ownerIds(orgId) { return db.prepare(`SELECT id FROM users WHERE organization_id=? AND role='owner' AND active=1`).all(orgId).map(r => r.id); }
 function setting(orgId, key, def) {
@@ -224,7 +234,7 @@ function intakeRateLimit(req, res, next) {
   const ip = req.ip || 'x';
   const nowMs = Date.now();
   const hits = (intakeHits.get(ip) || []).filter(t => nowMs - t < 3600_000);
-  if (hits.length >= 12) return res.status(429).json({ error: 'Too many requests — please wait a bit and try again, or call your property manager directly.' });
+  if (hits.length >= 12) return res.status(429).json({ error: 'Too many requests — please wait a bit and try again, or contact your property manager directly.' });
   hits.push(nowMs); intakeHits.set(ip, hits);
   next();
 }
@@ -366,7 +376,8 @@ router.get('/org', MGMT_READ, (req, res) => {
   res.json({
     ...org,
     approval_t1: +setting(req.oid, 'approval_t1', 150),
-    approval_t2: +setting(req.oid, 'approval_t2', 500)
+    approval_t2: +setting(req.oid, 'approval_t2', 500),
+    has_managers: hasManagers(req.oid)
   });
 });
 router.patch('/org', requireRole('owner'), (req, res) => {
@@ -854,7 +865,9 @@ router.get('/work-orders/:id', (req, res) => {
     active_timer: activeTimer,
     completion: completionCheck(req.oid, w),
     approval_t1: +setting(req.oid, 'approval_t1', 150),
-    approval_t2: +setting(req.oid, 'approval_t2', 500) });
+    approval_t2: +setting(req.oid, 'approval_t2', 500),
+    has_managers: hasManagers(req.oid),
+    supervisor: supervisorFor(req.oid) });
 });
 
 router.patch('/work-orders/:id', (req, res) => {
@@ -878,7 +891,7 @@ router.patch('/work-orders/:id', (req, res) => {
       }
       if (check.missing.length && override) {
         hist(req.oid, w.id, u.id, 'completion_override',
-          `Manager override — completed with missing requirements: ${check.missing.map(m => m.label).join(', ')}${b.override_note ? ' · ' + b.override_note : ''}`);
+          `${u.role === 'owner' ? 'Owner' : 'Manager'} override — completed with missing requirements: ${check.missing.map(m => m.label).join(', ')}${b.override_note ? ' · ' + b.override_note : ''}`);
       }
       const open = db.prepare('SELECT * FROM time_logs WHERE work_order_id=? AND ended_at IS NULL').all(w.id);
       for (const t of open) {
@@ -1030,7 +1043,8 @@ router.post('/work-orders/:id/approvals', (req, res) => {
   const { amount, reason } = req.body || {};
   if (!isMoney(amount) || +amount <= 0) return res.status(400).json({ error: 'A valid estimated amount is required' });
   const t1 = +setting(req.oid, 'approval_t1', 150), t2 = +setting(req.oid, 'approval_t2', 500);
-  const requiredRole = +amount > t2 ? 'owner' : 'manager';
+  // With no manager on the team every approval is the owner's call — a "manager tier" would be fiction.
+  const requiredRole = (!hasManagers(req.oid) || +amount > t2) ? 'owner' : 'manager';
   const id = db.prepare('INSERT INTO approvals (organization_id,work_order_id,requested_by,amount,reason,required_role,created_at) VALUES (?,?,?,?,?,?,?)')
     .run(req.oid, w.id, req.user.id, +amount, reason || null, requiredRole, now()).lastInsertRowid;
   db.prepare(`UPDATE work_orders SET status='waiting_approval' WHERE id=?`).run(w.id);
@@ -1038,13 +1052,13 @@ router.post('/work-orders/:id/approvals', (req, res) => {
   const targets = requiredRole === 'owner' ? ownerIds(req.oid) : mgmtIds(req.oid);
   notify(req.oid, targets, 'approval', `Approval requested: $${(+amount).toLocaleString()}`,
     `${req.user.name} — ${w.title} (${w.number})${requiredRole === 'owner' ? ' · requires owner' : ''}`, '#/work-orders/' + w.id);
-  res.json({ id, required_role: requiredRole, no_approval_needed_under: t1 });
+  res.json({ id, required_role: requiredRole, no_approval_needed_under: t1, single_tier: !hasManagers(req.oid) });
 });
 router.patch('/approvals/:id', MGMT_WRITE, (req, res) => {
   const a = db.prepare('SELECT * FROM approvals WHERE id=? AND organization_id=?').get(req.params.id, req.oid);
   if (!a) return notFound(res);
   if (a.required_role === 'owner' && req.user.role !== 'owner')
-    return res.status(403).json({ error: `Approvals over $${setting(req.oid, 'approval_t2', 500)} require an owner` });
+    return res.status(403).json({ error: `Approvals over $${setting(req.oid, 'approval_t2', 500)} need the owner's sign-off` });
   const decision = req.body.decision;
   if (!['approved', 'declined', 'info_requested'].includes(decision)) return res.status(400).json({ error: 'Invalid decision' });
   db.prepare('UPDATE approvals SET status=?, decided_by=?, decision_note=?, decided_at=? WHERE id=?')
@@ -1251,7 +1265,9 @@ router.get('/meta', (req, res) => {
   const out = {
     approval_t1: +setting(O, 'approval_t1', 150),
     approval_t2: +setting(O, 'approval_t2', 500),
-    org_name: (db.prepare('SELECT name FROM organizations WHERE id=?').get(O) || {}).name
+    org_name: (db.prepare('SELECT name FROM organizations WHERE id=?').get(O) || {}).name,
+    has_managers: hasManagers(O),
+    supervisor: supervisorFor(O)
   };
   if (canRead(req.user)) {
     out.properties = db.prepare(`SELECT id,name FROM properties WHERE organization_id=? AND active=1 ORDER BY name`).all(O);
