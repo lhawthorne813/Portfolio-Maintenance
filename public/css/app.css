@@ -325,3 +325,69 @@ th.sortable:hover{color:var(--pine)}
 /* Steadwell brand mark (inline SVG) */
 svg.brand-mark{width:30px;height:30px;border-radius:8px;flex-shrink:0;display:inline-block;vertical-align:middle}
 .login-card svg.brand-mark{width:38px;height:38px;border-radius:10px}
+
+/* ================= V2 components (previously missing) ================= */
+
+/* Filter / tab pills — horizontally scrollable, never overflow the viewport */
+.filters{display:flex;gap:8px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding:2px 0 8px;margin-bottom:4px;scrollbar-width:none}
+.filters::-webkit-scrollbar{display:none}
+.fpill{flex:0 0 auto;background:var(--card);border:1.5px solid var(--line);border-radius:99px;padding:8px 15px;font-size:13.5px;font-weight:600;color:var(--ink-2);white-space:nowrap;box-shadow:var(--shadow)}
+.fpill.on{background:var(--pine);border-color:var(--pine);color:#fff}
+select.fpill{appearance:none;padding-right:30px;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 16px) 55%,calc(100% - 11px) 55%;background-size:5px 5px;background-repeat:no-repeat}
+
+/* Property hero banner */
+.prop-hero{height:78px;border-radius:14px;display:flex;align-items:center;padding:0 16px;overflow:hidden}
+.prop-hero span{font-family:var(--font-d);font-weight:800;color:#fff;font-size:20px;letter-spacing:.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prop-hero.lg{height:104px}
+.prop-hero.lg span{font-size:24px}
+
+/* Cards & sections */
+.card-title{font-family:var(--font-d);font-weight:700;font-size:15.5px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.banner{border-radius:11px;padding:10px 13px;font-size:13.5px;font-weight:600;margin-bottom:10px}
+.banner.warn{background:var(--amber-soft);color:#8A5D00}
+.hr-item{font-size:13px;color:var(--ink-2);padding:3px 0;display:flex;gap:8px;align-items:baseline}
+.hr-item .pts{font-family:var(--font-m);font-weight:700;color:var(--red);flex-shrink:0}
+.note{border-left:3px solid var(--line);padding:6px 0 6px 11px;margin-bottom:9px;font-size:14px}
+.hello{font-family:var(--font-d);font-weight:800;font-size:23px;margin:2px 0 6px}
+.hello .s{font-family:var(--font-b);font-weight:500;font-size:14px;color:var(--muted);margin-top:3px}
+
+/* Photos */
+.photo-row{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.photo-row::-webkit-scrollbar{display:none}
+.photo-row img{width:82px;height:82px;object-fit:cover;border-radius:11px;flex:0 0 auto;cursor:pointer;background:var(--paper)}
+.photo-add{width:82px;height:82px;border-radius:11px;border:2px dashed var(--line);display:grid;place-items:center;font-size:26px;color:var(--muted);flex:0 0 auto;cursor:pointer}
+
+/* Asset life bar */
+.lifebar{height:5px;border-radius:99px;background:var(--line);margin-top:6px;overflow:hidden}
+.lifebar div{height:100%;border-radius:99px}
+
+/* Tables */
+.tbl{width:100%;border-collapse:collapse;font-size:13.5px}
+.tbl th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);padding:7px 9px;border-bottom:1.5px solid var(--line);white-space:nowrap}
+.tbl td{padding:9px;border-bottom:1px solid var(--line);white-space:nowrap}
+.tbl tr:last-child td{border-bottom:none}
+
+/* Calendar */
+.cal-day{background:var(--card);border-radius:var(--radius);box-shadow:var(--shadow);padding:12px 14px;margin-bottom:10px}
+.cal-day.today{border-left:4px solid var(--pine)}
+.cal-day.past{opacity:.72}
+.cal-date{font-family:var(--font-d);font-weight:700;font-size:14px;margin-bottom:4px}
+
+/* Timeline dots */
+.tl-item{display:flex;gap:11px;padding:9px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+.tl-item:last-child{border-bottom:none}
+.tl-dot{width:9px;height:9px;border-radius:50%;background:var(--pine);margin-top:6px;flex-shrink:0}
+.tl-dot.warn{background:var(--amber)}
+
+/* Analytics bars */
+.bars{display:flex;gap:10px;align-items:flex-end;overflow-x:auto;padding-top:8px;scrollbar-width:none}
+.bars::-webkit-scrollbar{display:none}
+.bar-col{flex:1 0 46px;text-align:center}
+.bar{background:var(--pine);border-radius:7px 7px 3px 3px;margin:0 auto;width:70%}
+.bar-v{font-size:10.5px;font-weight:700;margin-top:5px;color:var(--ink-2)}
+.bar-l{font-size:11px;color:var(--muted);margin-top:1px}
+
+/* Global overflow guards — nothing should ever push the page sideways */
+html,body{overflow-x:hidden}
+.page,.card{min-width:0;max-width:100%}
+.card{overflow-wrap:anywhere}
