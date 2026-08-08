@@ -285,6 +285,35 @@ router.post('/intake/:token', intakeRateLimit, upload.array('photos', 3), (req, 
 router.use(requireAuth);
 
 /* =====================================================================
+   OFFLINE SYNC — idempotent mutations
+   Clients attach X-Client-Op-Id to every queued mutation. If the same op
+   arrives twice (flaky reconnect, retry, double tap), the stored result is
+   replayed instead of applying the change again.
+===================================================================== */
+router.use((req, res, next) => {
+  const opId = req.get('X-Client-Op-Id');
+  if (!opId || req.method === 'GET') return next();
+  const prior = db.prepare('SELECT status, response FROM client_ops WHERE op_id=? AND user_id=?').get(opId, req.user.id);
+  if (prior) {
+    res.set('X-Replayed', '1');
+    return res.status(prior.status).json(JSON.parse(prior.response || '{}'));
+  }
+  const done = res.json.bind(res);
+  res.json = body => {
+    if (res.statusCode < 400) {
+      try {
+        db.prepare(`INSERT OR IGNORE INTO client_ops (op_id,user_id,method,path,status,response,created_at)
+          VALUES (?,?,?,?,?,?,?)`).run(opId, req.user.id, req.method, req.originalUrl, res.statusCode, JSON.stringify(body), now());
+      } catch (e) {}
+    }
+    return done(body);
+  };
+  next();
+});
+// Housekeeping: op records only need to outlive a device being offline
+setInterval(() => { try { db.prepare(`DELETE FROM client_ops WHERE created_at < datetime('now','-30 days')`).run(); } catch (e) {} }, 6 * 60 * 60 * 1000);
+
+/* =====================================================================
    TEAM MANAGEMENT (Settings → Team)
 ===================================================================== */
 router.get('/team/users', MGMT_READ, (req, res) => {
@@ -423,37 +452,37 @@ router.get('/dashboard', MGMT_READ, (req, res) => {
   // ----- Attention Center: grouped, actionable, each card links to the underlying problem -----
   const attention = [];
   const emerg = db.prepare(`${WO_SELECT} WHERE w.organization_id=? AND w.priority='emergency' AND w.status IN ${OPEN_STATUSES}`).all(O);
-  if (emerg.length) attention.push({ type: 'emergency', count: emerg.length, title: `${emerg.length} emergency repair${emerg.length > 1 ? 's' : ''}`,
+  if (emerg.length) attention.push({ type: 'emergency', count: emerg.length, title: `Emergency repair${emerg.length > 1 ? 's' : ''}`, level: 'critical',
     items: emerg.map(w => ({ t: w.title, s: w.property_name + (w.unit_label ? ' · Unit ' + w.unit_label : ''), link: '#/work-orders/' + w.id })) });
   const approvals = db.prepare(`SELECT a.*, w.title, w.id AS wo_id, u.name AS req_name FROM approvals a
     JOIN work_orders w ON w.id=a.work_order_id JOIN users u ON u.id=a.requested_by
     WHERE a.organization_id=? AND a.status='pending'`).all(O)
     .filter(a => a.required_role !== 'owner' || req.user.role === 'owner' || req.user.role === 'viewer');
-  if (approvals.length) attention.push({ type: 'approval', count: approvals.length, title: `${approvals.length} approval request${approvals.length > 1 ? 's' : ''}`,
+  if (approvals.length) attention.push({ type: 'approval', count: approvals.length, title: `Approval request${approvals.length > 1 ? 's' : ''}`, level: 'action',
     items: approvals.map(a => ({ t: `$${(+a.amount).toLocaleString()} — ${a.title}`, s: a.req_name + (a.required_role === 'owner' ? ' · needs owner' : ''), link: '#/work-orders/' + a.wo_id })) });
   const late = db.prepare(`${WO_SELECT} WHERE w.organization_id=? AND w.status IN ${OPEN_STATUSES} AND w.due_date < date('now') ORDER BY w.due_date LIMIT 10`).all(O);
-  if (late.length) attention.push({ type: 'overdue', count: overdue, title: `${overdue} overdue job${overdue > 1 ? 's' : ''}`,
+  if (late.length) attention.push({ type: 'overdue', count: overdue, title: `Overdue job${overdue > 1 ? 's' : ''}`, level: 'action',
     items: late.map(w => ({ t: w.title, s: `${w.property_name} · due ${w.due_date}`, link: '#/work-orders/' + w.id })) });
   const triage = db.prepare(`SELECT COUNT(*) c FROM requests WHERE organization_id=? AND status='open'`).get(O).c;
-  if (triage) attention.push({ type: 'triage', count: triage, title: `${triage} request${triage > 1 ? 's' : ''} need triage`, items: [], link: '#/maintenance' });
+  if (triage) attention.push({ type: 'triage', count: triage, title: `Request${triage > 1 ? 's' : ''} to triage`, level: 'action', items: [], link: '#/maintenance' });
   const ownerRev = db.prepare(`SELECT COUNT(*) c FROM requests WHERE organization_id=? AND status='owner_review'`).get(O).c;
   if (ownerRev && req.user.role !== 'manager') attention.push({ type: 'owner_review', count: ownerRev,
-    title: `${ownerRev} tenant request${ownerRev > 1 ? 's' : ''} awaiting owner review`, items: [], link: '#/maintenance' });
+    title: `Awaiting your review`, level: 'action', items: [], link: '#/maintenance' });
   const repeats = I.repeatRepairs(O);
-  if (repeats.length) attention.push({ type: 'repeat', count: repeats.length, title: `${repeats.length} repeat-repair warning${repeats.length > 1 ? 's' : ''}`,
+  if (repeats.length) attention.push({ type: 'repeat', count: repeats.length, title: `Repeat-repair warning${repeats.length > 1 ? 's' : ''}`, level: 'watch',
     items: repeats.map(r => ({ t: `${r.category} at ${r.property}`, s: `${r.count} calls / ${r.window} · $${r.total_spent.toLocaleString()}`, link: '#/properties/' + r.property_id })) });
   const pmOver = db.prepare(`SELECT s.*, p.name pn FROM pm_schedules s JOIN properties p ON p.id=s.property_id WHERE s.organization_id=? AND s.active=1 AND s.next_due < date('now')`).all(O);
-  if (pmOver.length) attention.push({ type: 'pm', count: pmOver.length, title: `${pmOver.length} preventive item${pmOver.length > 1 ? 's' : ''} overdue`,
+  if (pmOver.length) attention.push({ type: 'pm', count: pmOver.length, title: `Preventive item${pmOver.length > 1 ? 's' : ''} overdue`, level: 'watch',
     items: pmOver.slice(0, 6).map(s => ({ t: s.title, s: s.pn, link: '#/maintenance' })) });
   const anomalies = I.costAnomalies(O);
-  if (anomalies.length) attention.push({ type: 'anomaly', count: anomalies.length, title: `${anomalies.length} unusually expensive propert${anomalies.length > 1 ? 'ies' : 'y'}`,
+  if (anomalies.length) attention.push({ type: 'anomaly', count: anomalies.length, title: `Unusually expensive propert${anomalies.length > 1 ? 'ies' : 'y'}`, level: 'watch',
     items: anomalies.map(a => ({ t: a.property, s: `${a.multiple}× portfolio per-unit average`, link: '#/properties/' + a.property_id })) });
   const rvr = I.repairVsReplace(O);
-  if (rvr.length) attention.push({ type: 'rvr', count: rvr.length, title: `${rvr.length} asset${rvr.length > 1 ? 's' : ''} to review for replacement`,
+  if (rvr.length) attention.push({ type: 'rvr', count: rvr.length, title: `Asset${rvr.length > 1 ? 's' : ''} to review for replacement`, level: 'watch',
     items: rvr.map(r => ({ t: `${r.name} — ${r.property}`, s: `${r.repairs_12mo} repairs / 12 mo · $${r.spend_12mo.toLocaleString()}`, link: '#/analytics' })) });
   const quotes = db.prepare(`SELECT q.*, w.title, v.company FROM vendor_quotes q JOIN work_orders w ON w.id=q.work_order_id JOIN vendors v ON v.id=q.vendor_id
     WHERE q.organization_id=? AND q.status='submitted'`).all(O);
-  if (quotes.length) attention.push({ type: 'quote', count: quotes.length, title: `${quotes.length} vendor quote${quotes.length > 1 ? 's' : ''} to review`,
+  if (quotes.length) attention.push({ type: 'quote', count: quotes.length, title: `Vendor quote${quotes.length > 1 ? 's' : ''} to review`, level: 'action',
     items: quotes.map(q => ({ t: `$${(+q.price).toLocaleString()} — ${q.title}`, s: q.company, link: '#/work-orders/' + q.work_order_id })) });
 
   const spendByProperty = db.prepare(`SELECT p.id, p.name, COALESCE(SUM(e.amount),0) total,

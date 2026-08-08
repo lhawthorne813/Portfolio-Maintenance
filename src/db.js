@@ -424,6 +424,17 @@ function migrateV2() {
     MIGRATION_LOG.push('work_orders: number uniqueness changed from global to per-organization');
   }
 
+  // Offline sync: remembers every mutation a client has already applied, so a replayed
+  // request after reconnect returns the original result instead of duplicating work.
+  db.exec(`CREATE TABLE IF NOT EXISTS client_ops (
+    op_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    method TEXT, path TEXT,
+    status INTEGER, response TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_client_ops_created ON client_ops(created_at)`);
+
   // Phone notifications: web-push device subscriptions, per-kind push pref, optional Pushover key
   db.exec(`CREATE TABLE IF NOT EXISTS push_subscriptions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
